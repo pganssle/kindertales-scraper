@@ -1,0 +1,23 @@
+.cache/
+.coverage
+.hypothesis/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+__pycache__/
+*.egg-info/
+*.py[cod]
+build/
+dist/
+
+# Local configuration and credentials
+config.toml
+.env
+credentials*
+
+# Archives and browser artifacts
+archive/
+archives/
+playwright-report/
+test-results/
