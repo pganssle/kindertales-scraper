@@ -14,7 +14,7 @@ dist/
 # Local configuration and credentials
 config.toml
 .env
-credentials*
+/credentials*
 
 # Archives and browser artifacts
 archive/

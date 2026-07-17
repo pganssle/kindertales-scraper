@@ -1,0 +1,34 @@
+[account]
+email = "parent@example.com"
+
+[authentication]
+allow_plaintext_session_cache = false
+cache_directory = ".cache/kindertales-scraper"
+
+[archive]
+directory = "archive"
+
+[synchronization]
+overlap_days = 7
+
+[request_policy]
+max_in_flight = 8
+max_media_downloads = 2
+jitter_fraction = 0.10
+max_retries = 3
+stop_after_forbidden = 3
+quotas = [
+    { count = 8, window_seconds = 1.0 },
+    { count = 120, window_seconds = 60.0 },
+]
+
+[metadata]
+# Optional global fallback, used only when the media and matching center have no GPS.
+# fallback_latitude = 40.7128
+# fallback_longitude = -74.0060
+
+# Repeat for each Kindertales center. Keys are Kindertales center IDs.
+# [metadata.centers."center-123"]
+# latitude = 40.7128
+# longitude = -74.0060
+# timezone = "America/New_York"
