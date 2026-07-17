@@ -8,6 +8,8 @@ from typing import Any
 import attrs
 import httpx
 
+from . import scheduler
+
 
 class DiscoveryError(ValueError):
     """Raised when Kindertales discovery data is malformed."""
@@ -184,10 +186,26 @@ class KindertalesAdapter:
     client: httpx.AsyncClient
     children_path: str = "/api/family/children"
     activities_path: str = "/api/children/{child_id}/activities"
+    requester: scheduler.Requester | None = None
+
+    async def get(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        """Send discovery through the configured quota and retry boundary."""
+
+        async def send() -> httpx.Response:
+            return await self.client.get(path, params=params)
+
+        if self.requester is None:
+            return await send()
+        return await self.requester.request(send)
 
     async def children(self) -> tuple[Child, ...]:
         """Return every child linked to the family account."""
-        response = await self.client.get(self.children_path)
+        response = await self.get(self.children_path)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -214,7 +232,7 @@ class KindertalesAdapter:
                 params["from"] = from_date.isoformat()
             if through_date is not None:
                 params["through"] = through_date.isoformat()
-            response = await self.client.get(
+            response = await self.get(
                 self.activities_path.format(child_id=child_id),
                 params=params or None,
             )

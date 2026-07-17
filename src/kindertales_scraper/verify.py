@@ -1,0 +1,226 @@
+"""Integrity verification for portable Kindertales archives."""
+
+import json
+import sqlite3
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+import attrs
+
+from . import archive, metadata
+
+_EMBEDDABLE_SUFFIXES = frozenset(
+    {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".mp4", ".mov"}
+)
+
+
+@attrs.frozen
+class VerificationIssue:
+    """One archive integrity failure."""
+
+    media_id: str | None
+    message: str
+
+
+@attrs.frozen
+class VerificationReport:
+    """Aggregate archive verification results."""
+
+    checked_media: int
+    issues: tuple[VerificationIssue, ...]
+
+    @property
+    def valid(self) -> bool:
+        """Return whether no integrity failures were found."""
+        return not self.issues
+
+
+@attrs.frozen
+class ArchiveVerifier:
+    """Validate database, file, sidecar, hash, and embedded metadata contracts."""
+
+    root: Path
+    exiftool: metadata.ExifTool = attrs.field(factory=metadata.ExifTool)
+
+    def run(self) -> VerificationReport:
+        """Verify every indexed media record without mutating the archive."""
+        database = self.root / "index.sqlite3"
+        if not database.is_file():
+            return VerificationReport(
+                0,
+                (VerificationIssue(None, "archive index.sqlite3 is missing"),),
+            )
+        try:
+            connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        except sqlite3.DatabaseError as error:
+            return VerificationReport(
+                0,
+                (VerificationIssue(None, f"cannot open SQLite index: {error}"),),
+            )
+        connection.row_factory = sqlite3.Row
+        try:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version != archive.SCHEMA_VERSION:
+                return VerificationReport(
+                    0,
+                    (
+                        VerificationIssue(
+                            None, f"unsupported schema version: {version}"
+                        ),
+                    ),
+                )
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            if integrity != "ok":
+                return VerificationReport(
+                    0,
+                    (
+                        VerificationIssue(
+                            None, f"SQLite integrity check failed: {integrity}"
+                        ),
+                    ),
+                )
+            rows = connection.execute("SELECT * FROM media ORDER BY id").fetchall()
+            issues = [issue for row in rows for issue in self._verify_row(row)]
+            orphan_count = connection.execute(
+                """SELECT count(*) FROM activity_media am
+                LEFT JOIN activities a ON a.id=am.activity_id
+                LEFT JOIN media m ON m.id=am.media_id
+                WHERE a.id IS NULL OR m.id IS NULL"""
+            ).fetchone()[0]
+            if orphan_count:
+                issues.append(
+                    VerificationIssue(
+                        None, f"{orphan_count} orphan activity-media links"
+                    )
+                )
+            return VerificationReport(len(rows), tuple(issues))
+        except sqlite3.DatabaseError as error:
+            return VerificationReport(
+                0,
+                (VerificationIssue(None, f"cannot read SQLite index: {error}"),),
+            )
+        finally:
+            connection.close()
+
+    def _verify_row(self, row: sqlite3.Row) -> tuple[VerificationIssue, ...]:
+        media_id = str(row["id"])
+        issues: list[VerificationIssue] = []
+        media_path = self._contained(str(row["relative_path"]))
+        sidecar_path = self._contained(str(row["sidecar_path"]))
+        if media_path is None:
+            issues.append(
+                VerificationIssue(media_id, "media path escapes archive root")
+            )
+        elif not media_path.is_file():
+            issues.append(VerificationIssue(media_id, "media file is missing"))
+        if sidecar_path is None:
+            issues.append(
+                VerificationIssue(media_id, "sidecar path escapes archive root")
+            )
+        elif not sidecar_path.is_file():
+            issues.append(VerificationIssue(media_id, "sidecar file is missing"))
+        if (
+            media_path is None
+            or sidecar_path is None
+            or not media_path.is_file()
+            or not sidecar_path.is_file()
+        ):
+            return tuple(issues)
+        try:
+            document = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            issues.append(
+                VerificationIssue(media_id, "sidecar is not valid UTF-8 JSON")
+            )
+            return tuple(issues)
+        if not isinstance(document, dict):
+            issues.append(
+                VerificationIssue(media_id, "sidecar must contain a JSON object")
+            )
+            return tuple(issues)
+        issues.extend(self._verify_document(row, media_path, document))
+        return tuple(issues)
+
+    def _verify_document(
+        self,
+        row: sqlite3.Row,
+        media_path: Path,
+        document: Mapping[str, Any],
+    ) -> tuple[VerificationIssue, ...]:
+        media_id = str(row["id"])
+        issues: list[VerificationIssue] = []
+        if document.get("version") != archive.SIDECAR_VERSION:
+            issues.append(VerificationIssue(media_id, "unsupported sidecar version"))
+        source = document.get("source")
+        if not isinstance(source, dict) or source.get("media_id") != media_id:
+            issues.append(
+                VerificationIssue(media_id, "sidecar media ID does not match index")
+            )
+        hashes = document.get("hashes")
+        final_hash = archive.sha256(media_path)
+        if final_hash != row["final_sha256"]:
+            issues.append(
+                VerificationIssue(media_id, "media SHA-256 does not match index")
+            )
+        if not isinstance(hashes, dict) or hashes.get("final_sha256") != final_hash:
+            issues.append(
+                VerificationIssue(media_id, "media SHA-256 does not match sidecar")
+            )
+        elif hashes.get("source_sha256") != row["source_sha256"]:
+            issues.append(
+                VerificationIssue(media_id, "source SHA-256 does not match index")
+            )
+        issues.extend(self._verify_embedded(media_id, media_path, document))
+        return tuple(issues)
+
+    def _verify_embedded(
+        self,
+        media_id: str,
+        media_path: Path,
+        document: Mapping[str, Any],
+    ) -> tuple[VerificationIssue, ...]:
+        metadata_document = document.get("metadata")
+        embedded = (
+            metadata_document.get("embedded_fields", {})
+            if isinstance(metadata_document, dict)
+            else {}
+        )
+        if not isinstance(embedded, dict):
+            return (VerificationIssue(media_id, "embedded_fields must be an object"),)
+        if media_path.suffix.casefold() not in _EMBEDDABLE_SUFFIXES:
+            return ()
+        try:
+            actual = self.exiftool.read(media_path)
+        except metadata.MetadataError as error:
+            return (VerificationIssue(media_id, str(error)),)
+        actual_by_name = {
+            name.rsplit("]", 1)[-1].rsplit(":", 1)[-1]: value
+            for name, value in actual.items()
+        }
+        issues = []
+        for name, expected in embedded.items():
+            tag = name.rsplit("]", 1)[-1].rsplit(":", 1)[-1]
+            if tag not in actual_by_name:
+                issues.append(
+                    VerificationIssue(media_id, f"embedded metadata is missing {name}")
+                )
+            elif not self._value_matches(actual_by_name[tag], expected):
+                issues.append(
+                    VerificationIssue(media_id, f"embedded metadata differs for {name}")
+                )
+        return tuple(issues)
+
+    @staticmethod
+    def _value_matches(actual: object, expected: object) -> bool:
+        if isinstance(actual, list):
+            return str(expected) in {str(value) for value in actual}
+        return str(actual) == str(expected)
+
+    def _contained(self, relative: str) -> Path | None:
+        candidate = (self.root / relative).resolve()
+        try:
+            candidate.relative_to(self.root.resolve())
+        except ValueError:
+            return None
+        return candidate

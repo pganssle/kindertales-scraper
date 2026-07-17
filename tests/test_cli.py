@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from kindertales_scraper import __version__, cli, credentials, sync
+from kindertales_scraper import __version__, cli, credentials, sync, verify
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -91,3 +91,35 @@ def test_sync_command(
         (sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2)), True, True)
     ]
     assert capsys.readouterr().out == "2 children, 3 activities, 4 media (dry run)\n"
+
+
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [
+        (verify.VerificationReport(2, ()), (0, "verified 2 media files\n")),
+        (
+            verify.VerificationReport(
+                1,
+                (
+                    verify.VerificationIssue("media-1", "hash mismatch"),
+                    verify.VerificationIssue(None, "database mismatch"),
+                ),
+            ),
+            (1, "media-1: hash mismatch\ndatabase mismatch\n"),
+        ),
+    ],
+)
+def test_verify_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    report: verify.VerificationReport,
+    expected: tuple[int, str],
+) -> None:
+    """The verify CLI reports success and individual integrity failures."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[account]\nemail="a@example.com"', encoding="utf-8")
+    monkeypatch.setattr(verify.ArchiveVerifier, "run", lambda _self: report)
+    expected_code, expected_output = expected
+    assert cli.main(("verify", "--config", str(config_path))) == expected_code
+    assert capsys.readouterr().out == expected_output

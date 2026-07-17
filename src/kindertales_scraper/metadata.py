@@ -29,7 +29,12 @@ class Enrichment:
 
 
 def _has(metadata: Mapping[str, Any], names: frozenset[str]) -> bool:
-    return any(key.rsplit(":", 1)[-1] in names for key in metadata)
+    return any(_tag_name(key) in names for key in metadata)
+
+
+def _tag_name(value: str) -> str:
+    """Remove ExifTool's bracketed or colon-separated group prefix."""
+    return value.rsplit("]", 1)[-1].rsplit(":", 1)[-1]
 
 
 def fields_for(

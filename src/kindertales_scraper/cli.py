@@ -5,7 +5,7 @@ import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, auth, config, credentials, sync
+from . import __version__, auth, config, credentials, sync, verify
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     synchronize.add_argument("--through", dest="through_date", type=sync.parse_date)
     synchronize.add_argument("--dry-run", action="store_true")
     synchronize.add_argument("--headed", action="store_true")
+    verification = subparsers.add_parser("verify", help="verify an existing archive")
+    verification.add_argument("--config", type=Path, default=Path("config.toml"))
     return parser
 
 
@@ -56,4 +58,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{summary.children} children, {summary.activities} activities, "
             f"{summary.media} media" + (" (dry run)" if summary.dry_run else "")
         )
+    elif arguments.command == "verify":
+        settings = config.load(arguments.config)
+        report = verify.ArchiveVerifier(settings.archive_directory).run()
+        for issue in report.issues:
+            prefix = f"{issue.media_id}: " if issue.media_id is not None else ""
+            print(f"{prefix}{issue.message}")  # noqa: T201
+        if report.valid:
+            print(f"verified {report.checked_media} media files")  # noqa: T201
+        return 0 if report.valid else 1
     return 0

@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
-from kindertales_scraper import discovery
+from kindertales_scraper import config, discovery, scheduler
 
 
 def fixture(name: str) -> dict[str, Any]:
@@ -197,3 +197,33 @@ async def test_repeated_pagination_cursor_is_rejected() -> None:
         adapter = discovery.KindertalesAdapter(client)
         with pytest.raises(discovery.DiscoveryError, match="repeated"):
             _ = [item async for item in adapter.activities("child", cursor="same")]
+
+
+@pytest.mark.asyncio
+async def test_adapter_uses_request_policy() -> None:
+    """Discovery requests pass through the shared quota/retry boundary."""
+
+    class Limiter:
+        calls = 0
+
+        async def acquire(self) -> float:
+            self.calls += 1
+            return float(self.calls)
+
+    limiter = Limiter()
+    policy = config.RequestPolicy(
+        quotas=(config.Quota(100, 1),),
+        jitter_fraction=0,
+        max_retries=0,
+    )
+    requester = scheduler.Requester(policy, limiter)
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, json={"children": []})
+    )
+    async with httpx.AsyncClient(
+        base_url="https://example.test",
+        transport=transport,
+    ) as client:
+        adapter = discovery.KindertalesAdapter(client, requester=requester)
+        assert await adapter.children() == ()
+    assert limiter.calls == 1

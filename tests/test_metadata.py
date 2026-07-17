@@ -68,7 +68,7 @@ def test_preserves_existing_metadata(
     """Authentic capture, GPS, caption, and creator fields are never overwritten."""
     child, activity = context
     original = {
-        "EXIF:DateTimeOriginal": "2020:01:01 01:02:03",
+        "[EXIF]DateTimeOriginal": "2020:01:01 01:02:03",
         "Composite:GPSPosition": "1 2",
         "IPTC:Caption-Abstract": "Existing",
         "XMP:Creator": "Existing creator",

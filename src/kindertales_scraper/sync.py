@@ -385,7 +385,7 @@ async def run_configured(  # pragma: no cover - exercised by the authorized smok
         with archive.Archive(settings.archive_directory) as store:
             engine = SyncEngine(
                 settings,
-                discovery.KindertalesAdapter(client),
+                discovery.KindertalesAdapter(client, requester=requester),
                 client,
                 store,
                 requester,
