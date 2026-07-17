@@ -269,6 +269,14 @@ class Archive:
         self.connection.commit()
         return run_id
 
+    def link_media(self, activity_id: str, media_id: str) -> None:
+        """Associate already archived media with another activity."""
+        self.connection.execute(
+            "INSERT OR IGNORE INTO activity_media VALUES (?, ?)",
+            (activity_id, media_id),
+        )
+        self.connection.commit()
+
     def finish_sync(
         self,
         run_id: str,

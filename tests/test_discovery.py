@@ -151,9 +151,18 @@ async def test_adapter_paginates() -> None:
     ) as client:
         adapter = discovery.KindertalesAdapter(client)
         assert await adapter.children() == discovery.parse_children(children_response)
-        activities = [item async for item in adapter.activities("child-1")]
+        activities = [
+            item
+            async for item in adapter.activities(
+                "child-1",
+                from_date=dt.date(2026, 7, 1),
+                through_date=dt.date(2026, 7, 2),
+            )
+        ]
     assert len(activities) == 1
     assert requests[1].url.params["cursor"] == "cursor-2"
+    assert requests[1].url.params["from"] == "2026-07-01"
+    assert requests[1].url.params["through"] == "2026-07-02"
 
 
 @pytest.mark.asyncio

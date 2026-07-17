@@ -1,0 +1,296 @@
+"""Tests for resumable end-to-end synchronization."""
+
+import datetime as dt
+import hashlib
+import json
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import httpx
+import pytest
+
+from kindertales_scraper import archive, config, discovery, metadata, scheduler, sync
+
+
+class ImmediateLimiter:
+    """Admit requests immediately."""
+
+    async def acquire(self) -> float:
+        return 0.0
+
+
+class FakeAdapter:
+    """Return configured discovery records and retain requested bounds."""
+
+    def __init__(
+        self,
+        children: tuple[discovery.Child, ...],
+        activities: tuple[discovery.Activity, ...],
+        error: Exception | None = None,
+    ) -> None:
+        self.child_records = children
+        self.activity_records = activities
+        self.error = error
+        self.bounds: list[tuple[dt.date | None, dt.date | None]] = []
+
+    async def children(self) -> tuple[discovery.Child, ...]:
+        if self.error is not None:
+            raise self.error
+        return self.child_records
+
+    async def activities(
+        self,
+        child_id: str,
+        *,
+        cursor: str | None = None,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
+    ) -> AsyncIterator[discovery.Activity]:
+        assert cursor is None
+        self.bounds.append((from_date, through_date))
+        for activity in self.activity_records:
+            if activity.child_id == child_id:
+                yield activity
+
+
+class FakeEnricher:
+    """Enrich media deterministically without an ExifTool installation."""
+
+    def enrich(
+        self,
+        path: Path,
+        _child: discovery.Child,
+        _activity: discovery.Activity,
+        _settings: config.Config,
+    ) -> metadata.Enrichment:
+        path.write_bytes(path.read_bytes() + b" enriched")
+        return metadata.Enrichment(
+            {"original": True},
+            {"embedded": "yes"},
+            inferred_time=True,
+            inferred_gps=False,
+        )
+
+
+@pytest.fixture
+def records() -> tuple[discovery.Child, tuple[discovery.Activity, ...]]:
+    """Return two activities which reference the same medium."""
+    child = discovery.Child("child-1", "Alex")
+    medium = discovery.MediaReference(
+        "media-1",
+        "https://example.test/media.jpg",
+        "image/jpeg",
+        "media.jpg",
+    )
+    activities = tuple(
+        discovery.Activity(
+            f"activity-{day}",
+            child.id,
+            "Art",
+            dt.datetime(2026, 7, day, 10, tzinfo=dt.UTC),
+            (medium,),
+        )
+        for day in (1, 2)
+    )
+    return child, activities
+
+
+def settings(tmp_path: Path) -> config.Config:
+    """Return isolated synchronization configuration."""
+    return config.Config(
+        email="a@example.com",
+        archive_directory=tmp_path / "archive",
+        request_policy=config.RequestPolicy(
+            quotas=(config.Quota(100, 1),),
+            jitter_fraction=0,
+            max_retries=0,
+        ),
+    )
+
+
+async def engine(
+    tmp_path: Path,
+    adapter: FakeAdapter,
+    handler: httpx.AsyncBaseTransport,
+) -> AsyncIterator[tuple[sync.SyncEngine, archive.Archive]]:
+    """Yield an engine with open HTTP and archive resources."""
+    configuration = settings(tmp_path)
+    async with httpx.AsyncClient(transport=handler) as client:
+        with archive.Archive(configuration.archive_directory) as store:
+            requester = scheduler.Requester(
+                configuration.request_policy, ImmediateLimiter()
+            )
+            yield (
+                sync.SyncEngine(
+                    configuration,
+                    adapter,
+                    client,
+                    store,
+                    requester,
+                    FakeEnricher(),
+                ),
+                store,
+            )
+
+
+@pytest.mark.asyncio
+async def test_sync_downloads_deduplicates_and_archives(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """A complete run downloads duplicate media once and links every activity."""
+    child, activities = records
+    requests = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200, content=b"source", headers={"Content-Type": "image/jpeg"}
+        )
+
+    adapter = FakeAdapter((child,), activities)
+    async for runner, store in engine(tmp_path, adapter, httpx.MockTransport(handler)):
+        summary = await runner.run()
+        media_row = store.connection.execute("SELECT * FROM media").fetchone()
+        links = store.connection.execute("SELECT * FROM activity_media").fetchall()
+        run = store.connection.execute("SELECT status FROM sync_runs").fetchone()
+    assert summary == sync.SyncSummary(1, 2, 1, dry_run=False)
+    assert requests == 1
+    assert len(links) == 2
+    assert run["status"] == "complete"
+    assert media_row["source_sha256"] == hashlib.sha256(b"source").hexdigest()
+    assert media_row["source_sha256"] != media_row["final_sha256"]
+    sidecar = json.loads(
+        (settings(tmp_path).archive_directory / media_row["sidecar_path"]).read_text()
+    )
+    assert sidecar["metadata"]["inferred_time"] is True
+
+
+@pytest.mark.asyncio
+async def test_dry_run_filters_without_writing(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """Dry-run applies bounds but does not mutate the archive or request media."""
+    child, activities = records
+    adapter = FakeAdapter((child,), activities)
+
+    def fail(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("dry-run downloaded media")
+
+    async for runner, store in engine(tmp_path, adapter, httpx.MockTransport(fail)):
+        summary = await runner.run(
+            sync.Bounds(dt.date(2026, 7, 2), dt.date(2026, 7, 2)),
+            dry_run=True,
+        )
+        assert (
+            store.connection.execute("SELECT count(*) FROM sync_runs").fetchone()[0]
+            == 0
+        )
+    assert summary == sync.SyncSummary(1, 1, 1, dry_run=True)
+    assert adapter.bounds == [(dt.date(2026, 7, 2), dt.date(2026, 7, 2))]
+
+
+@pytest.mark.asyncio
+async def test_resume_uses_overlap_and_requested_lower_bound(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """Stored timestamps overlap by seven days but never precede an explicit bound."""
+    child, _ = records
+    older = discovery.Activity(
+        "older",
+        child.id,
+        "Note",
+        dt.datetime(2026, 7, 11, tzinfo=dt.UTC),
+        (),
+    )
+    adapter = FakeAdapter((child,), (older,))
+    async for runner, store in engine(
+        tmp_path, adapter, httpx.MockTransport(lambda _: httpx.Response(500))
+    ):
+        run_id = store.begin_sync()
+        store.finish_sync(run_id, "complete", {child.id: "2026-07-15T10:00:00+00:00"})
+        await runner.run(sync.Bounds(from_date=dt.date(2026, 7, 10)))
+        assert store.latest_cursors()[child.id] == "2026-07-15T10:00:00+00:00"
+    assert adapter.bounds == [(dt.date(2026, 7, 10), None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, "missing"),
+        ({"Content-Type": "text/html"}, "text/html"),
+        ({"Content-Type": "video/mp4"}, "differs"),
+    ],
+)
+async def test_invalid_media_response_fails_run_and_cleans_temporary(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+    headers: dict[str, str],
+    expected: str,
+) -> None:
+    """Unexpected media responses fail the run without leaving partial downloads."""
+    child, activities = records
+    adapter = FakeAdapter((child,), activities[:1])
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, content=b"not media", headers=headers)
+    )
+    async for runner, store in engine(tmp_path, adapter, transport):
+        with pytest.raises(ExceptionGroup, match="archive tasks") as caught:
+            await runner.run()
+        assert expected in str(caught.value.exceptions[0])
+        status = store.connection.execute("SELECT status FROM sync_runs").fetchone()[0]
+    assert status == "failed"
+    assert not tuple(settings(tmp_path).archive_directory.rglob(".tmp/*"))
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_finishes_sync(
+    tmp_path: Path,
+) -> None:
+    """A discovery failure marks the run failed before propagating."""
+    adapter = FakeAdapter((), (), RuntimeError("discovery failed"))
+    async for runner, store in engine(
+        tmp_path, adapter, httpx.MockTransport(lambda _: httpx.Response(500))
+    ):
+        with pytest.raises(RuntimeError, match="discovery failed"):
+            await runner.run()
+        status = store.connection.execute("SELECT status FROM sync_runs").fetchone()[0]
+    assert status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_dry_run_discovery_failure_has_no_run(
+    tmp_path: Path,
+) -> None:
+    """A dry-run failure propagates without creating sync state."""
+    adapter = FakeAdapter((), (), RuntimeError("discovery failed"))
+    async for runner, store in engine(
+        tmp_path,
+        adapter,
+        httpx.MockTransport(lambda _: httpx.Response(500)),
+    ):
+        with pytest.raises(RuntimeError, match="discovery failed"):
+            await runner.run(dry_run=True)
+        count = store.connection.execute("SELECT count(*) FROM sync_runs").fetchone()[0]
+    assert count == 0
+
+
+@pytest.mark.parametrize(
+    ("from_date", "through_date"),
+    [(dt.date(2026, 2, 2), dt.date(2026, 2, 1))],
+)
+def test_reversed_bounds(from_date: dt.date, through_date: dt.date) -> None:
+    """Reversed bounds are rejected."""
+    with pytest.raises(sync.SyncError, match="cannot be later"):
+        sync.Bounds(from_date, through_date)
+
+
+def test_parse_date() -> None:
+    """CLI dates are strict ISO dates."""
+    assert sync.parse_date("2026-07-01") == dt.date(2026, 7, 1)
+    with pytest.raises(ValueError, match="invalid ISO date"):
+        sync.parse_date("July 1")

@@ -200,15 +200,23 @@ class KindertalesAdapter:
         child_id: str,
         *,
         cursor: str | None = None,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
     ) -> AsyncIterator[Activity]:
         """Yield all activity pages, rejecting repeated cursors."""
         seen: set[str] = set()
         next_cursor = cursor
         while True:
-            params = {"cursor": next_cursor} if next_cursor is not None else None
+            params = {}
+            if next_cursor is not None:
+                params["cursor"] = next_cursor
+            if from_date is not None:
+                params["from"] = from_date.isoformat()
+            if through_date is not None:
+                params["through"] = through_date.isoformat()
             response = await self.client.get(
                 self.activities_path.format(child_id=child_id),
-                params=params,
+                params=params or None,
             )
             response.raise_for_status()
             payload = response.json()
