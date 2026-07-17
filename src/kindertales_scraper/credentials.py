@@ -10,11 +10,13 @@ SERVICE = "kindertales-scraper"
 SESSION_KEY_USER = "session-encryption-key"
 
 
-class CredentialStoreUnavailable(RuntimeError):
+class CredentialStoreUnavailableError(RuntimeError):
     """Raised when a persistent credential operation requires a keyring."""
 
 
-def password(email: str, prompt: Callable[[str], str] = getpass.getpass) -> tuple[str, bool]:
+def password(
+    email: str, prompt: Callable[[str], str] = getpass.getpass
+) -> tuple[str, bool]:
     """Return the account password and whether it came from persistent storage."""
     try:
         stored = keyring.get_password(SERVICE, email)
@@ -35,7 +37,7 @@ def set_password(email: str, value: str) -> None:
     try:
         keyring.set_password(SERVICE, email, value)
     except keyring.errors.KeyringError as error:
-        raise CredentialStoreUnavailable from error
+        raise CredentialStoreUnavailableError from error
 
 
 def get_session_key() -> str | None:
@@ -43,7 +45,7 @@ def get_session_key() -> str | None:
     try:
         return keyring.get_password(SERVICE, SESSION_KEY_USER)
     except keyring.errors.KeyringError as error:
-        raise CredentialStoreUnavailable from error
+        raise CredentialStoreUnavailableError from error
 
 
 def set_session_key(value: str) -> None:
@@ -59,4 +61,4 @@ def delete(email: str) -> None:
         except keyring.errors.PasswordDeleteError:
             continue
         except keyring.errors.KeyringError as error:
-            raise CredentialStoreUnavailable from error
+            raise CredentialStoreUnavailableError from error

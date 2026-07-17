@@ -82,7 +82,7 @@ def test_required_keyring_failure(
 
     monkeypatch.setattr(credentials.keyring, "get_password", fail)
     monkeypatch.setattr(credentials.keyring, "set_password", fail)
-    with pytest.raises(credentials.CredentialStoreUnavailable):
+    with pytest.raises(credentials.CredentialStoreUnavailableError):
         function("user", "value")
 
 
@@ -107,5 +107,5 @@ def test_delete_keyring_failure(monkeypatch: pytest.MonkeyPatch) -> None:
         raise keyring.errors.KeyringError
 
     monkeypatch.setattr(credentials.keyring, "delete_password", fail)
-    with pytest.raises(credentials.CredentialStoreUnavailable):
+    with pytest.raises(credentials.CredentialStoreUnavailableError):
         credentials.delete("a@example.com")
