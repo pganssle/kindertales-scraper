@@ -2,6 +2,7 @@
 
 import io
 import json
+import secrets
 from pathlib import Path
 from unittest import mock
 
@@ -227,8 +228,7 @@ async def test_playwright_login_captures_complete_state(
     login_button = mock.Mock(click=mock.AsyncMock())
     page = mock.Mock(
         goto=mock.AsyncMock(),
-        get_by_label=mock.Mock(side_effect=[email_field, password_field]),
-        get_by_role=mock.Mock(return_value=login_button),
+        locator=mock.Mock(side_effect=[email_field, password_field, login_button]),
         wait_for_url=mock.AsyncMock(),
     )
     context = mock.Mock(
@@ -250,15 +250,71 @@ async def test_playwright_login_captures_complete_state(
             return None
 
     monkeypatch.setattr(auth.async_api, "async_playwright", PlaywrightContext)
-    login = auth.PlaywrightLogin(authenticated_url_fragment="/home", timeout_ms=12)
+    login = auth.PlaywrightLogin(
+        authenticated_url_pattern="https://example.test/**",
+        timeout_ms=12,
+    )
     assert await login.authenticate("a@example.com", "secret", headed=True) == {
         "cookies": []
     }
     chromium.launch.assert_awaited_once_with(headless=False)
     page.goto.assert_awaited_once_with(login.login_url)
+    assert page.locator.call_args_list == [
+        mock.call('[data-test-id="input-identifier"]'),
+        mock.call('[data-test-id="input-password"]'),
+        mock.call('[data-test-id="submit-btn"]'),
+    ]
     email_field.fill.assert_awaited_once_with("a@example.com")
     password_field.fill.assert_awaited_once_with("secret")
-    login_button.click.assert_awaited_once_with()
-    page.wait_for_url.assert_awaited_once_with("**/home**", timeout=12)
+    assert login_button.click.await_count == 2
+    page.wait_for_url.assert_awaited_once_with(
+        "https://example.test/**",
+        timeout=12,
+    )
     context.storage_state.assert_awaited_once_with(indexed_db=True)
+    browser.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_playwright_login_redacts_password_from_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Browser diagnostics never expose the submitted password."""
+    secret = secrets.token_urlsafe(12)
+    identifier = mock.Mock(fill=mock.AsyncMock())
+    password = mock.Mock(
+        fill=mock.AsyncMock(
+            side_effect=auth.async_api.Error(f'fill("{secret}") timed out')
+        )
+    )
+    submit = mock.Mock(click=mock.AsyncMock())
+    page = mock.Mock(
+        goto=mock.AsyncMock(),
+        locator=mock.Mock(side_effect=[identifier, password, submit]),
+    )
+    context = mock.Mock(new_page=mock.AsyncMock(return_value=page))
+    browser = mock.Mock(
+        new_context=mock.AsyncMock(return_value=context),
+        close=mock.AsyncMock(),
+    )
+    playwright = mock.Mock(
+        chromium=mock.Mock(launch=mock.AsyncMock(return_value=browser))
+    )
+
+    class PlaywrightContext:
+        async def __aenter__(self) -> mock.Mock:
+            return playwright
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(auth.async_api, "async_playwright", PlaywrightContext)
+    with pytest.raises(auth.AuthenticationError) as caught:
+        await auth.PlaywrightLogin().authenticate(
+            "a@example.com",
+            secret,
+            headed=False,
+        )
+    assert secret not in str(caught.value)
+    assert "REDACTED" in str(caught.value)
     browser.close.assert_awaited_once_with()

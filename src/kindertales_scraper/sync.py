@@ -364,7 +364,7 @@ async def run_configured(  # pragma: no cover - exercised by the authorized smok
             cookies=_cookies(state),
             follow_redirects=False,
         ) as validation_client:
-            response = await validation_client.get("/api/family/children")
+            response = await validation_client.get("/index.php?pg=dashboard")
             return response.status_code == httpx.codes.OK and not response.is_redirect
 
     async def authenticate() -> auth.State:
@@ -385,7 +385,7 @@ async def run_configured(  # pragma: no cover - exercised by the authorized smok
         with archive.Archive(settings.archive_directory) as store:
             engine = SyncEngine(
                 settings,
-                discovery.KindertalesAdapter(client, requester=requester),
+                discovery.LegacyKindertalesAdapter(client, requester=requester),
                 client,
                 store,
                 requester,

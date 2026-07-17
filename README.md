@@ -49,8 +49,8 @@ optional global coordinates are used only after a center-specific value.
 # Inspect a bounded run without changing the archive.
 kindertales-scraper sync --from 2026-07-01 --through 2026-07-02 --dry-run --headed
 
-# Synchronize all exposed history, or resume with the configured overlap.
-kindertales-scraper sync --headed
+# Synchronize the same authorized bounded range.
+kindertales-scraper sync --from 2026-07-01 --through 2026-07-02 --headed
 
 # Check SQLite integrity, files, hashes, sidecars, and embedded metadata.
 kindertales-scraper verify
@@ -59,10 +59,9 @@ kindertales-scraper verify
 kindertales-scraper credentials delete
 ```
 
-The first run traverses all exposed media history unless date bounds are given.
-Later runs use the latest per-child activity timestamp with the configured
-seven-day overlap. Records missing during a complete initial traversal become
-unavailable in the index; archived files are never deleted.
+The current legacy HTML adapter requires both date bounds. Later bounded runs
+use the latest per-child activity timestamp with the configured seven-day
+overlap. Archived files are never deleted.
 
 ## Archive and privacy
 

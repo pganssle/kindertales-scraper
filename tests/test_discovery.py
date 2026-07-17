@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -227,3 +228,163 @@ async def test_adapter_uses_request_policy() -> None:
         adapter = discovery.KindertalesAdapter(client, requester=requester)
         assert await adapter.children() == ()
     assert limiter.calls == 1
+
+
+LEGACY_DASHBOARD = """
+<a href="/index.php?pg=help">Help</a>
+<ul class="children-menu">
+  <li><a href="/index.php?pg=dashboard&amp;cid=child-1">
+    <span class="childName">Alex</span>
+  </a></li>
+  <li><a href="/index.php?pg=dashboard&amp;cid=child-2">
+    <span class="childName">Sam</span>
+  </a></li>
+</ul>
+<a href="/index.php?pg=dailyreport&amp;cid=child-1&amp;subpg=activity">
+  Daily Activity
+</a>
+"""
+
+LEGACY_REPORT = """
+<div class="contentBoxes" id="forfun">
+  <div class="enrollmentTitle">For Fun</div>
+  <div class="gallery">
+    <a class="html5lightbox image_video"
+       href="https://media.example.test/uploads/photo.JPG?signature=synthetic"
+       title="Building blocks"><img src="thumbnail.jpg"></a>
+    <a class="image_video html5lightbox"
+       href="https://media.example.test/uploads/movie.mp4?signature=synthetic"
+       title="Building blocks"><img src="thumbnail.jpg"></a>
+  </div>
+</div>
+<div class="contentBoxes">
+  <a class="html5lightbox image_video">Missing URL</a>
+  <a class="html5lightbox image_video" href="https://media.example.test/"
+     title="First caption"></a>
+  <a class="html5lightbox image_video" href="https://media.example.test/file.bin"
+     title="Second caption"></a>
+  <a class="html5lightbox image_video" href="https://media.example.test/no-title.bin">
+  </a>
+</div>
+"""
+
+
+def test_parse_legacy_dashboard_children() -> None:
+    """Legacy dashboard navigation provides every linked child and name."""
+    assert discovery.parse_legacy_children(LEGACY_DASHBOARD) == (
+        discovery.Child("child-1", "Alex"),
+        discovery.Child("child-2", "Sam"),
+    )
+    assert discovery.parse_legacy_children(
+        '<a href="?cid=unknown">Daily Activity</a>'
+    ) == (discovery.Child("unknown", "Child 1"),)
+    assert discovery.parse_legacy_children(
+        '<a href="?cid=child-1"><span class="childName">Alex</span></a>'
+    ) == (discovery.Child("child-1", "Alex"),)
+
+
+def test_parse_legacy_daily_report() -> None:
+    """Legacy daily reports produce stable, typed activity media context."""
+    activity_date = dt.date(2026, 7, 14)
+    first = discovery.parse_legacy_activities(
+        LEGACY_REPORT,
+        "child-1",
+        activity_date,
+        ZoneInfo("America/New_York"),
+    )
+    second = discovery.parse_legacy_activities(
+        LEGACY_REPORT.replace("signature=synthetic", "signature=reissued"),
+        "child-1",
+        activity_date,
+        ZoneInfo("America/New_York"),
+    )
+    assert len(first) == 2
+    assert first[0].id == second[0].id
+    assert first[0].kind == "For Fun"
+    assert first[0].occurred_at.isoformat() == "2026-07-14T00:00:00-04:00"
+    assert first[0].caption == "Building blocks"
+    assert first[0].media[0].id == second[0].media[0].id
+    assert first[0].media[0].content_type == "image/jpeg"
+    assert first[0].media[0].filename == "photo.JPG"
+    assert first[0].media[1].content_type == "video/mp4"
+    assert first[1].kind == "activity"
+    assert first[1].caption is None
+    assert first[1].media[0].filename is None
+    assert first[1].media[0].content_type is None
+    assert discovery.parse_legacy_activities(
+        "<html><body>No activities</body></html>",
+        "child-1",
+        activity_date,
+        dt.UTC,
+    ) == ()
+
+
+@pytest.mark.asyncio
+async def test_legacy_adapter_traverses_inclusive_dates() -> None:
+    """Legacy discovery requests each bounded daily report through the limiter."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        document = LEGACY_DASHBOARD if len(requests) == 1 else LEGACY_REPORT
+        return httpx.Response(200, text=document)
+
+    class Limiter:
+        calls = 0
+
+        async def acquire(self) -> float:
+            self.calls += 1
+            return float(self.calls)
+
+    limiter = Limiter()
+    policy = config.RequestPolicy(
+        quotas=(config.Quota(100, 1),),
+        jitter_fraction=0,
+        max_retries=0,
+    )
+    requester = scheduler.Requester(policy, limiter)
+    async with httpx.AsyncClient(
+        base_url="https://example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = discovery.LegacyKindertalesAdapter(
+            client,
+            requester,
+            dt.UTC,
+        )
+        assert len(await adapter.children()) == 2
+        activities = [
+            item
+            async for item in adapter.activities(
+                "child-1",
+                cursor="ignored",
+                from_date=dt.date(2026, 7, 14),
+                through_date=dt.date(2026, 7, 15),
+            )
+        ]
+    assert len(activities) == 4
+    assert requests[1].url.params["activitydate"] == "07/14/2026"
+    assert requests[2].url.params["activitydate"] == "07/15/2026"
+    assert limiter.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_legacy_adapter_requires_explicit_bounds() -> None:
+    """The HTML adapter refuses an accidental unbounded history traversal."""
+    async with httpx.AsyncClient(base_url="https://example.test") as client:
+        adapter = discovery.LegacyKindertalesAdapter(client)
+        with pytest.raises(discovery.DiscoveryError, match="--from and --through"):
+            _ = [item async for item in adapter.activities("child-1")]
+
+
+@pytest.mark.asyncio
+async def test_legacy_adapter_can_send_without_request_policy() -> None:
+    """The adapter remains independently usable without a scheduler."""
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, text=LEGACY_DASHBOARD)
+    )
+    async with httpx.AsyncClient(
+        base_url="https://example.test",
+        transport=transport,
+    ) as client:
+        assert len(await discovery.LegacyKindertalesAdapter(client).children()) == 2

@@ -10,7 +10,7 @@ import attrs
 from cryptography import fernet
 from playwright import async_api
 
-from . import config, credentials
+from . import config, credentials, redaction
 
 State = Mapping[str, Any]
 Validator = Callable[[State], Awaitable[bool]]
@@ -126,7 +126,9 @@ class PlaywrightLogin:
     """Interactive Playwright login which allows the user to complete MFA."""
 
     login_url: str = "https://app.kindertales.com/"
-    authenticated_url_fragment: str = "/family"
+    authenticated_url_pattern: str = (
+        "https://app.kindertales.com/index.php?pg=dashboard*"
+    )
     timeout_ms: float = 300_000
 
     async def authenticate(
@@ -139,16 +141,25 @@ class PlaywrightLogin:
         """Log in and capture cookies, local storage, and IndexedDB state."""
         async with async_api.async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=not headed)
-            context = await browser.new_context()
-            page = await context.new_page()
-            await page.goto(self.login_url)
-            await page.get_by_label("Email").fill(email)
-            await page.get_by_label("Password").fill(password)
-            await page.get_by_role("button", name="Log in").click()
-            await page.wait_for_url(
-                f"**{self.authenticated_url_fragment}**",
-                timeout=self.timeout_ms,
-            )
-            state = await context.storage_state(indexed_db=True)
-            await browser.close()
-            return state
+            try:
+                context = await browser.new_context()
+                page = await context.new_page()
+                await page.goto(self.login_url)
+                identifier = page.locator('[data-test-id="input-identifier"]')
+                password_input = page.locator('[data-test-id="input-password"]')
+                submit = page.locator('[data-test-id="submit-btn"]')
+                await identifier.fill(email)
+                await submit.click()
+                await password_input.fill(password)
+                await submit.click()
+                await page.wait_for_url(
+                    self.authenticated_url_pattern,
+                    timeout=self.timeout_ms,
+                )
+                return await context.storage_state(indexed_db=True)
+            except async_api.Error as error:
+                diagnostic = redaction.text(str(error).replace(password, "REDACTED"))
+                msg = f"Kindertales browser authentication failed: {diagnostic}"
+                raise AuthenticationError(msg) from None
+            finally:
+                await browser.close()

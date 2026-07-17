@@ -1,9 +1,13 @@
 """Typed discovery of children, activities, and media references."""
 
 import datetime as dt
+import hashlib
 import html.parser
 from collections.abc import AsyncIterator, Mapping, Sequence
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlsplit
+from zoneinfo import ZoneInfo
 
 import attrs
 import httpx
@@ -177,6 +181,268 @@ def parse_children_html(document: str) -> tuple[Child, ...]:
     parser = _ChildHTMLParser()
     parser.feed(document)
     return tuple(parser.children)
+
+
+def _classes(attributes: Mapping[str, str | None]) -> frozenset[str]:
+    return frozenset((attributes.get("class") or "").split())
+
+
+@attrs.define
+class _Anchor:
+    href: str
+    classes: frozenset[str]
+    title: str | None
+    text: list[str] = attrs.field(factory=list)
+    child_name: list[str] = attrs.field(factory=list)
+
+
+class _LegacyDashboardParser(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.anchors: list[_Anchor] = []
+        self._anchor: _Anchor | None = None
+        self._child_name_depth = 0
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs_list: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs_list)
+        if tag == "a" and self._anchor is None:
+            self._anchor = _Anchor(
+                attributes.get("href") or "",
+                _classes(attributes),
+                attributes.get("title"),
+            )
+        if self._anchor is not None and "childName" in _classes(attributes):
+            self._child_name_depth += 1
+
+    def handle_data(self, data: str) -> None:
+        if self._anchor is None:
+            return
+        self._anchor.text.append(data)
+        if self._child_name_depth:
+            self._anchor.child_name.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._anchor is None:
+            return
+        if self._child_name_depth and tag != "a":
+            self._child_name_depth -= 1
+        if tag == "a":
+            self.anchors.append(self._anchor)
+            self._anchor = None
+            self._child_name_depth = 0
+
+
+def _child_id(href: str) -> str | None:
+    values = parse_qs(urlsplit(href).query).get("cid")
+    return values[0] if values and values[0] else None
+
+
+def parse_legacy_children(document: str) -> tuple[Child, ...]:
+    """Extract linked children from the authenticated dashboard navigation."""
+    parser = _LegacyDashboardParser()
+    parser.feed(document)
+    names: dict[str, str] = {}
+    linked_ids: list[str] = []
+    for anchor in parser.anchors:
+        child_id = _child_id(anchor.href)
+        if child_id is None:
+            continue
+        name = " ".join("".join(anchor.child_name).split())
+        if name:
+            names.setdefault(child_id, name)
+        text = " ".join("".join(anchor.text).split()).casefold()
+        if "daily activity" in text and child_id not in linked_ids:
+            linked_ids.append(child_id)
+    child_ids = list(names)
+    child_ids.extend(child_id for child_id in linked_ids if child_id not in names)
+    return tuple(
+        Child(child_id, names.get(child_id, f"Child {index}"))
+        for index, child_id in enumerate(child_ids, start=1)
+    )
+
+
+@attrs.define
+class _LegacyBox:
+    identifier: str
+    title: list[str] = attrs.field(factory=list)
+    media: list[_Anchor] = attrs.field(factory=list)
+
+
+class _LegacyActivityParser(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.boxes: list[_LegacyBox] = []
+        self._box: _LegacyBox | None = None
+        self._box_depth = 0
+        self._title_depth = 0
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs_list: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs_list)
+        classes = _classes(attributes)
+        if self._box is None and tag == "div" and "contentBoxes" in classes:
+            self._box = _LegacyBox(attributes.get("id") or "activity")
+            self._box_depth = 1
+        elif self._box is not None and tag == "div":
+            self._box_depth += 1
+        if self._box is not None and "enrollmentTitle" in classes:
+            self._title_depth = self._box_depth
+        if (
+            self._box is not None
+            and tag == "a"
+            and {"html5lightbox", "image_video"} <= classes
+        ):
+            href = attributes.get("href")
+            if href:
+                self._box.media.append(
+                    _Anchor(href, classes, attributes.get("title"))
+                )
+
+    def handle_data(self, data: str) -> None:
+        if self._box is not None and self._title_depth:
+            self._box.title.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._box is None or tag != "div":
+            return
+        if self._title_depth == self._box_depth:
+            self._title_depth = 0
+        self._box_depth -= 1
+        if self._box_depth == 0:
+            self.boxes.append(self._box)
+            self._box = None
+
+
+def _stable_id(*parts: str) -> str:
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+
+def _content_type(path: str) -> str | None:
+    return {
+        ".gif": "image/gif",
+        ".jpeg": "image/jpeg",
+        ".jpg": "image/jpeg",
+        ".mov": "video/quicktime",
+        ".mp4": "video/mp4",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }.get(PurePosixPath(path).suffix.casefold())
+
+
+def parse_legacy_activities(
+    document: str,
+    child_id: str,
+    activity_date: dt.date,
+    timezone: dt.tzinfo,
+) -> tuple[Activity, ...]:
+    """Extract activity context and media from one legacy daily report."""
+    parser = _LegacyActivityParser()
+    parser.feed(document)
+    activities = []
+    for index, box in enumerate(parser.boxes):
+        kind = " ".join("".join(box.title).split()) or box.identifier
+        activity_id = _stable_id(
+            child_id,
+            activity_date.isoformat(),
+            box.identifier,
+            str(index),
+        )
+        media = []
+        captions = set()
+        for anchor in box.media:
+            split_url = urlsplit(anchor.href)
+            source_path = unquote(split_url.path)
+            if anchor.title and anchor.title.strip():
+                captions.add(anchor.title.strip())
+            media.append(
+                MediaReference(
+                    _stable_id(split_url.netloc, source_path),
+                    anchor.href,
+                    _content_type(source_path),
+                    PurePosixPath(source_path).name or None,
+                )
+            )
+        activities.append(
+            Activity(
+                activity_id,
+                child_id,
+                kind,
+                dt.datetime.combine(activity_date, dt.time(), timezone),
+                tuple(media),
+                next(iter(captions)) if len(captions) == 1 else None,
+            )
+        )
+    return tuple(activities)
+
+
+@attrs.frozen
+class LegacyKindertalesAdapter:
+    """Read-only adapter for Kindertales' authenticated legacy HTML pages."""
+
+    client: httpx.AsyncClient
+    requester: scheduler.Requester | None = None
+    timezone: dt.tzinfo = attrs.field(factory=lambda: ZoneInfo("America/New_York"))
+
+    async def get(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, str] | None = None,
+    ) -> httpx.Response:
+        """Send discovery through the configured quota and retry boundary."""
+
+        async def send() -> httpx.Response:
+            return await self.client.get(path, params=params)
+
+        if self.requester is None:
+            return await send()
+        return await self.requester.request(send)
+
+    async def children(self) -> tuple[Child, ...]:
+        """Return every child linked from the authenticated dashboard."""
+        response = await self.get("/index.php", params={"pg": "dashboard"})
+        response.raise_for_status()
+        return parse_legacy_children(response.text)
+
+    async def activities(
+        self,
+        child_id: str,
+        *,
+        cursor: str | None = None,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
+    ) -> AsyncIterator[Activity]:
+        """Yield daily-report activities over an inclusive bounded range."""
+        del cursor
+        if from_date is None or through_date is None:
+            msg = "legacy Kindertales discovery requires --from and --through"
+            raise DiscoveryError(msg)
+        current = from_date
+        while current <= through_date:
+            response = await self.get(
+                "/index.php",
+                params={
+                    "pg": "dailyreport",
+                    "cid": child_id,
+                    "activitydate": current.strftime("%m/%d/%Y"),
+                },
+            )
+            response.raise_for_status()
+            for activity in parse_legacy_activities(
+                response.text,
+                child_id,
+                current,
+                self.timezone,
+            ):
+                yield activity
+            current += dt.timedelta(days=1)
 
 
 @attrs.frozen
