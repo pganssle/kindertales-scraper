@@ -1,0 +1,70 @@
+[build-system]
+requires = ["flit_core >=3.11,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "kindertales-scraper"
+version = "0.1.0"
+description = "Export an authorized family's Kindertales media archive"
+readme = "README.md"
+requires-python = ">=3.13"
+license = {file = "LICENSE"}
+authors = [{name = "Paul Ganssle"}]
+dependencies = [
+    "attrs>=25.1",
+    "cryptography>=44",
+    "httpx>=0.28",
+    "keyring>=25.6",
+    "platformdirs>=4.3",
+    "playwright>=1.51",
+]
+
+[project.optional-dependencies]
+test = [
+    "coverage[toml]>=7.7",
+    "hypothesis>=6.130",
+    "mypy>=1.15",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.26",
+    "ruff>=0.11",
+]
+
+[project.scripts]
+kindertales-scraper = "kindertales_scraper.cli:main"
+
+[tool.flit.module]
+name = "kindertales_scraper"
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["kindertales_scraper"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",
+    "D203",
+    "D213",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["kindertales_scraper"]
