@@ -1,0 +1,6 @@
+{
+  "children": [
+    {"id": "child-1", "name": "Alex", "center_id": "center-1"},
+    {"id": "child-2", "name": "Sam", "center_id": null}
+  ]
+}

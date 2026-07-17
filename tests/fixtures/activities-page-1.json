@@ -1,0 +1,22 @@
+{
+  "activities": [
+    {
+      "id": "activity-1",
+      "child_id": "child-1",
+      "type": "Art",
+      "occurred_at": "2026-07-01T09:30:00-04:00",
+      "caption": "Finger painting",
+      "author": "Teacher",
+      "center_id": "center-1",
+      "media": [
+        {
+          "id": "media-1",
+          "url": "https://media.example.test/photo.jpg?signature=synthetic",
+          "content_type": "image/jpeg",
+          "filename": "photo.jpg"
+        }
+      ]
+    }
+  ],
+  "next_cursor": "cursor-2"
+}
