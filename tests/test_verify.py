@@ -25,7 +25,11 @@ class FakeExifTool:
         return self.values
 
 
-def create_archive(tmp_path: Path, suffix: str = ".jpg") -> tuple[Path, Path]:
+def create_archive(
+    tmp_path: Path,
+    suffix: str = ".jpg",
+    embedded_fields: dict[str, str] | None = None,
+) -> tuple[Path, Path]:
     """Create a minimal valid archive and return media and sidecar paths."""
     child = discovery.Child("child", "Alex")
     medium = discovery.MediaReference(
@@ -54,7 +58,7 @@ def create_archive(tmp_path: Path, suffix: str = ".jpg") -> tuple[Path, Path]:
                 source,
                 archive.sha256(source),
                 {},
-                {"XMP-dc:Source": "Kindertales"},
+                embedded_fields or {"XMP-dc:Source": "Kindertales"},
             )
         )
     return media_path, media_path.with_suffix(media_path.suffix + ".json")
@@ -70,6 +74,42 @@ def test_valid_archive(tmp_path: Path) -> None:
     assert report == verify.VerificationReport(1, ())
     assert report.valid
     assert media_path.is_file()
+
+
+@pytest.mark.parametrize(
+    "actual",
+    [
+        "2026:07:01 00:00:00+00:00",
+        ["2026:07:01 00:00:00+00:00"],
+    ],
+)
+def test_exiftool_datetime_representation_is_normalized(
+    tmp_path: Path,
+    actual: object,
+) -> None:
+    """ExifTool's EXIF-style date rendering matches the stored ISO value."""
+    create_archive(
+        tmp_path,
+        embedded_fields={"XMP-photoshop:DateCreated": "2026-07-01T00:00:00+00:00"},
+    )
+    report = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool({"XMP:DateCreated": actual}),  # type: ignore[arg-type]
+    ).run()
+    assert report.valid
+
+
+def test_invalid_embedded_datetime_differs(tmp_path: Path) -> None:
+    """Malformed embedded dates do not bypass metadata verification."""
+    create_archive(
+        tmp_path,
+        embedded_fields={"XMP-photoshop:DateCreated": "not-a-date"},
+    )
+    report = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool({"XMP:DateCreated": "also-not-a-date"}),  # type: ignore[arg-type]
+    ).run()
+    assert report.issues[0].message.startswith("embedded metadata differs")
 
 
 @pytest.mark.parametrize(

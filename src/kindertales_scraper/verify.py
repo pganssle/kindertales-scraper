@@ -1,5 +1,6 @@
 """Integrity verification for portable Kindertales archives."""
 
+import datetime as dt
 import json
 import sqlite3
 from collections.abc import Mapping
@@ -13,6 +14,7 @@ from . import archive, metadata
 _EMBEDDABLE_SUFFIXES = frozenset(
     {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".mp4", ".mov"}
 )
+_DATETIME_TAGS = frozenset({"CreateDate", "DateCreated", "DateTimeOriginal"})
 
 
 @attrs.frozen
@@ -205,17 +207,36 @@ class ArchiveVerifier:
                 issues.append(
                     VerificationIssue(media_id, f"embedded metadata is missing {name}")
                 )
-            elif not self._value_matches(actual_by_name[tag], expected):
+            elif not self._value_matches(actual_by_name[tag], expected, tag=tag):
                 issues.append(
                     VerificationIssue(media_id, f"embedded metadata differs for {name}")
                 )
         return tuple(issues)
 
     @staticmethod
-    def _value_matches(actual: object, expected: object) -> bool:
-        if isinstance(actual, list):
-            return str(expected) in {str(value) for value in actual}
-        return str(actual) == str(expected)
+    def _value_matches(actual: object, expected: object, *, tag: str) -> bool:
+        values = actual if isinstance(actual, list) else [actual]
+        if tag in _DATETIME_TAGS:
+            expected_datetime = ArchiveVerifier._parse_datetime(expected)
+            return expected_datetime is not None and any(
+                ArchiveVerifier._parse_datetime(value) == expected_datetime
+                for value in values
+            )
+        return str(expected) in {str(value) for value in values}
+
+    @staticmethod
+    def _parse_datetime(value: object) -> dt.datetime | None:
+        text = str(value)
+        if (
+            len(text) >= len("0000:00:00 00:00:00")
+            and text[4] == ":"
+            and text[7] == ":"
+        ):
+            text = f"{text[:4]}-{text[5:7]}-{text[8:10]}T{text[11:]}"
+        try:
+            return dt.datetime.fromisoformat(text)
+        except ValueError:
+            return None
 
     def _contained(self, relative: str) -> Path | None:
         candidate = (self.root / relative).resolve()
