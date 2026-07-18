@@ -5,7 +5,7 @@ import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, auth, config, credentials, names, sync, verify
+from . import __version__, auth, center_setup, config, credentials, names, sync, verify
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,6 +16,12 @@ def build_parser() -> argparse.ArgumentParser:
     configure = subparsers.add_parser("configure", help="create local configuration")
     configure.add_argument("--config", type=Path, default=Path("config.toml"))
     configure.add_argument("--email")
+    configure_centers = subparsers.add_parser(
+        "configure-centers",
+        help="discover and configure linked center metadata",
+    )
+    configure_centers.add_argument("--config", type=Path, default=Path("config.toml"))
+    configure_centers.add_argument("--headed", action="store_true")
     credential_parser = subparsers.add_parser("credentials")
     credential_commands = credential_parser.add_subparsers(dest="credential_command")
     delete = credential_commands.add_parser("delete")
@@ -38,6 +44,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         email = arguments.email or input("Kindertales account email: ")
         config.write_initial(arguments.config, email)
         credentials.password(email)
+    elif arguments.command == "configure-centers":
+        settings = config.load(arguments.config)
+        try:
+            asyncio.run(center_setup.run_configured(settings, headed=arguments.headed))
+        except names.NameConfigurationRequiredError:
+            return 2
     elif (
         arguments.command == "credentials" and arguments.credential_command == "delete"
     ):

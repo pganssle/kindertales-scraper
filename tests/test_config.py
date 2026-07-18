@@ -41,12 +41,16 @@ max_retries = 0
 stop_after_forbidden = 2
 quotas = [{count = 5, window_seconds = 2.0}]
 [metadata]
-fallback_latitude = 1.5
-fallback_longitude = -2.5
+[metadata.defaults.center]
+latitude = 1.5
+longitude = -2.5
+timezone = "America/Chicago"
+gps_uncertainty_meters = 250.0
 [metadata.centers."123"]
 latitude = 40.0
 longitude = -73.0
 timezone = "America/New_York"
+gps_uncertainty_meters = 30.0
 """,
         encoding="utf-8",
     )
@@ -82,11 +86,18 @@ timezone = "America/New_York"
         max_retries=0,
         stop_after_forbidden=2,
     )
-    assert loaded.fallback_coordinates == config.Coordinates(1.5, -2.5)
+    assert loaded.default_center == config.Center(
+        config.Coordinates(1.5, -2.5),
+        "America/Chicago",
+        250.0,
+    )
     assert loaded.centers["123"] == config.Center(
         coordinates=config.Coordinates(40.0, -73.0),
         timezone="America/New_York",
+        gps_uncertainty_meters=30.0,
     )
+    assert loaded.center("missing") == loaded.default_center
+    assert loaded.center("123") == loaded.centers["123"]
 
 
 @pytest.mark.parametrize(
@@ -108,12 +119,32 @@ timezone = "America/New_York"
         ),
         ("[account]\nemail='a@b'\n[request_policy]\nmax_in_flight=0", "request limits"),
         (
-            "[account]\nemail='a@b'\n[metadata]\nfallback_latitude=1",
+            "[account]\nemail='a@b'\n[metadata.defaults.center]\nlatitude=1",
             "must both be numbers",
         ),
         (
-            "[account]\nemail='a@b'\n[metadata]\nfallback_latitude=91\nfallback_longitude=2",
+            "[account]\nemail='a@b'\n[metadata]\nfallback_latitude=1\nfallback_longitude=2",
+            "metadata.defaults.center",
+        ),
+        (
+            "[account]\nemail='a@b'\n[metadata.defaults.center]\nlatitude=91\nlongitude=2",
             "outside",
+        ),
+        (
+            "[account]\nemail='a@b'\n[metadata]\ndefaults=[]",
+            "metadata.defaults must be a table",
+        ),
+        (
+            "[account]\nemail='a@b'\n[metadata.defaults]\ncenter='x'",
+            "metadata.defaults.center must be a table",
+        ),
+        (
+            "[account]\nemail='a@b'\n[metadata.defaults.center]\ntimezone=2",
+            "timezone must be a string",
+        ),
+        (
+            "[account]\nemail='a@b'\n[metadata.defaults.center]\ngps_uncertainty_meters='x'",
+            "gps_uncertainty_meters must be a number",
         ),
         ("[account]\nemail='a@b'\n[metadata]\ncenters=[]", "centers must be a table"),
         ("[account]\nemail='a@b'\n[metadata.centers]\nx=2", "each center"),
@@ -175,6 +206,31 @@ def test_invalid_quota(count: int, window: float) -> None:
     """Quotas require finite, positive values."""
     with pytest.raises(config.ConfigError, match="positive"):
         config.Quota(count, window)
+
+
+@pytest.mark.parametrize("value", [-1.0, float("inf")])
+def test_invalid_gps_uncertainty(value: float) -> None:
+    """GPS uncertainty is a finite, non-negative radius in meters."""
+    with pytest.raises(config.ConfigError, match="gps_uncertainty"):
+        config.Center(gps_uncertainty_meters=value)
+
+
+def test_center_inherits_fields_but_not_half_a_coordinate_pair() -> None:
+    """Center defaults merge by field after coordinate-pair validation."""
+    settings = config.Config(
+        "a@example.com",
+        default_center=config.Center(
+            config.Coordinates(1, 2),
+            "America/New_York",
+            100,
+        ),
+        centers={"center": config.Center(timezone="America/Chicago")},
+    )
+    assert settings.center("center") == config.Center(
+        config.Coordinates(1, 2),
+        "America/Chicago",
+        100,
+    )
 
 
 def test_write_initial_configuration(tmp_path: Path) -> None:

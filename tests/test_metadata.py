@@ -31,14 +31,23 @@ def context() -> tuple[discovery.Child, discovery.Activity]:
 def settings(*, center: bool = True, fallback: bool = True) -> config.Config:
     """Build metadata configuration with selectable coordinate sources."""
     centers = (
-        {"center-1": config.Center(config.Coordinates(40.0, -73.0), "America/New_York")}
+        {
+            "center-1": config.Center(
+                config.Coordinates(40.0, -73.0),
+                "America/New_York",
+                25.0,
+            )
+        }
         if center
         else {}
     )
     return config.Config(
         email="a@example.com",
         centers=centers,
-        fallback_coordinates=config.Coordinates(1.0, 2.0) if fallback else None,
+        default_center=config.Center(
+            config.Coordinates(1.0, 2.0) if fallback else None,
+            gps_uncertainty_meters=100.0,
+        ),
     )
 
 
@@ -53,12 +62,14 @@ def test_infers_missing_time_gps_caption_and_author(
     assert fields["EXIF:DateTimeOriginal"] == "2026:07:01 09:30:00"
     assert fields["EXIF:OffsetTimeOriginal"] == "-04:00"
     assert fields["EXIF:GPSLatitude"] == "40.0"
+    assert fields["EXIF:GPSHPositioningError"] == "25.0"
     assert fields["XMP-dc:Description"] == "A caption"
     assert fields["XMP-dc:Creator"] == "A teacher"
     assert fields["XMP-dc:Source"] == "Kindertales"
     provenance = json.loads(fields["XMP-photoshop:Instructions"])
     assert provenance["time_inferred"] is True
     assert provenance["gps_inferred"] is True
+    assert provenance["gps_uncertainty_meters"] == 25.0
     assert inferred_time
     assert inferred_gps
 
@@ -79,10 +90,24 @@ def test_preserves_existing_metadata(
     )
     assert "EXIF:DateTimeOriginal" not in fields
     assert "EXIF:GPSLatitude" not in fields
+    assert "EXIF:GPSHPositioningError" not in fields
     assert "XMP-dc:Description" not in fields
     assert "XMP-dc:Creator" not in fields
     assert not inferred_time
     assert not inferred_gps
+
+
+def test_preserves_existing_gps_uncertainty(
+    context: tuple[discovery.Child, discovery.Activity],
+) -> None:
+    """An embedded positioning error is not replaced when GPS is inferred."""
+    child, activity = context
+    fields, _, inferred_gps = metadata.fields_for(
+        {"EXIF:GPSHPositioningError": 5}, child, activity, settings()
+    )
+    assert fields["EXIF:GPSLatitude"] == "40.0"
+    assert "EXIF:GPSHPositioningError" not in fields
+    assert inferred_gps
 
 
 @pytest.mark.parametrize(
@@ -101,6 +126,8 @@ def test_gps_precedence(
         {}, child, activity, settings(center=center, fallback=fallback)
     )
     assert fields.get("EXIF:GPSLatitude") == expected
+    if expected is not None:
+        assert fields["EXIF:GPSHPositioningError"] == "100.0"
     assert inferred is (expected is not None)
 
 

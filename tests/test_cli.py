@@ -5,7 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from kindertales_scraper import __version__, cli, credentials, names, sync, verify
+from kindertales_scraper import (
+    __version__,
+    center_setup,
+    cli,
+    config,
+    credentials,
+    names,
+    sync,
+    verify,
+)
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -108,6 +117,39 @@ def test_sync_exits_after_printing_manual_name_configuration(
 
     monkeypatch.setattr(sync, "run_configured", run)
     assert cli.main(("sync", "--config", str(config_path))) == 2
+
+
+def test_configure_centers_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The center setup command passes configuration and browser mode."""
+    path = tmp_path / "config.toml"
+    path.write_text('[account]\nemail="a@example.com"', encoding="utf-8")
+    calls: list[tuple[Path | None, bool]] = []
+
+    async def run(settings: object, *, headed: bool) -> None:
+        assert isinstance(settings, config.Config)
+        calls.append((settings.source_path, headed))
+
+    monkeypatch.setattr(center_setup, "run_configured", run)
+    assert cli.main(("configure-centers", "--config", str(path), "--headed")) == 0
+    assert calls == [(path, True)]
+
+
+def test_configure_centers_honors_manual_name_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Center discovery exits cleanly when names will be edited manually."""
+    path = tmp_path / "config.toml"
+    path.write_text('[account]\nemail="a@example.com"', encoding="utf-8")
+
+    async def run(*_args: object, **_kwargs: object) -> None:
+        raise names.NameConfigurationRequiredError
+
+    monkeypatch.setattr(center_setup, "run_configured", run)
+    assert cli.main(("configure-centers", "--config", str(path))) == 2
 
 
 @pytest.mark.parametrize(

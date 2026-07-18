@@ -191,6 +191,16 @@ class Center:
 
     coordinates: Coordinates | None = None
     timezone: str | None = None
+    gps_uncertainty_meters: float | None = None
+
+    def __attrs_post_init__(self) -> None:
+        """Validate optional horizontal positioning uncertainty."""
+        if self.gps_uncertainty_meters is not None and (
+            not math.isfinite(self.gps_uncertainty_meters)
+            or self.gps_uncertainty_meters < 0
+        ):
+            msg = "gps_uncertainty_meters must be a finite non-negative number"
+            raise ConfigError(msg)
 
 
 @attrs.frozen
@@ -214,7 +224,7 @@ class Config:
     overlap_days: int = 7
     request_policy: RequestPolicy = RequestPolicy()
     centers: Mapping[str, Center] = attrs.field(factory=dict)
-    fallback_coordinates: Coordinates | None = None
+    default_center: Center = Center()
     exports: Exports = Exports()
     child_names: Mapping[str, str] = attrs.field(factory=dict)
     use_kindertales_name: bool = False
@@ -228,6 +238,19 @@ class Config:
         if self.overlap_days < 0:
             msg = "synchronization.overlap_days cannot be negative"
             raise ConfigError(msg)
+
+    def center(self, center_id: str | None) -> Center:
+        """Return center metadata with missing values inherited from defaults."""
+        selected = self.centers.get(center_id or "", Center())
+        return Center(
+            coordinates=selected.coordinates or self.default_center.coordinates,
+            timezone=selected.timezone or self.default_center.timezone,
+            gps_uncertainty_meters=(
+                selected.gps_uncertainty_meters
+                if selected.gps_uncertainty_meters is not None
+                else self.default_center.gps_uncertainty_meters
+            ),
+        )
 
 
 def _table(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -247,6 +270,56 @@ def _coordinates(data: Mapping[str, Any], prefix: str) -> Coordinates | None:
         msg = f"{prefix}latitude and {prefix}longitude must both be numbers"
         raise ConfigError(msg)
     return Coordinates(float(latitude), float(longitude))
+
+
+def _center(data: Mapping[str, Any], location: str) -> Center:
+    uncertainty = data.get("gps_uncertainty_meters")
+    if uncertainty is not None and not isinstance(uncertainty, int | float):
+        msg = f"{location}.gps_uncertainty_meters must be a number"
+        raise ConfigError(msg)
+    timezone = data.get("timezone")
+    if timezone is not None and not isinstance(timezone, str):
+        msg = f"{location}.timezone must be a string"
+        raise ConfigError(msg)
+    return Center(
+        coordinates=_coordinates(data, ""),
+        timezone=timezone,
+        gps_uncertainty_meters=float(uncertainty)
+        if uncertainty is not None
+        else None,
+    )
+
+
+def _metadata_centers(
+    metadata: Mapping[str, Any],
+) -> tuple[Mapping[str, Center], Center]:
+    if "fallback_latitude" in metadata or "fallback_longitude" in metadata:
+        msg = (
+            "metadata fallback coordinates moved to "
+            "metadata.defaults.center latitude and longitude"
+        )
+        raise ConfigError(msg)
+    raw_centers = metadata.get("centers", {})
+    if not isinstance(raw_centers, dict):
+        msg = "metadata.centers must be a table"
+        raise ConfigError(msg)
+    centers = {
+        str(center_id): _center(center_data, f'metadata.centers."{center_id}"')
+        for center_id, center_data in raw_centers.items()
+        if isinstance(center_data, dict)
+    }
+    if len(centers) != len(raw_centers):
+        msg = "each center must be a table"
+        raise ConfigError(msg)
+    metadata_defaults = metadata.get("defaults", {})
+    if not isinstance(metadata_defaults, dict):
+        msg = "metadata.defaults must be a table"
+        raise ConfigError(msg)
+    default_center_data = metadata_defaults.get("center", {})
+    if not isinstance(default_center_data, dict):
+        msg = "metadata.defaults.center must be a table"
+        raise ConfigError(msg)
+    return centers, _center(default_center_data, "metadata.defaults.center")
 
 
 def load(path: Path) -> Config:
@@ -278,23 +351,7 @@ def load(path: Path) -> Config:
         msg = "each quota must be a table"
         raise ConfigError(msg)
 
-    raw_centers = metadata.get("centers", {})
-    if not isinstance(raw_centers, dict):
-        msg = "metadata.centers must be a table"
-        raise ConfigError(msg)
-    centers = {
-        str(center_id): Center(
-            coordinates=_coordinates(center_data, ""),
-            timezone=str(center_data["timezone"])
-            if "timezone" in center_data
-            else None,
-        )
-        for center_id, center_data in raw_centers.items()
-        if isinstance(center_data, dict)
-    }
-    if len(centers) != len(raw_centers):
-        msg = "each center must be a table"
-        raise ConfigError(msg)
+    centers, default_center = _metadata_centers(metadata)
 
     email = account.get("email")
     if not isinstance(email, str):
@@ -351,7 +408,7 @@ def load(path: Path) -> Config:
             stop_after_forbidden=int(policy_data.get("stop_after_forbidden", 3)),
         ),
         centers=centers,
-        fallback_coordinates=_coordinates(metadata, "fallback_"),
+        default_center=default_center,
         exports=Exports(
             child_records=bool(exports.get("child_records", True)),
             messages=bool(exports.get("messages", False)),

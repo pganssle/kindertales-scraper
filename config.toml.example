@@ -38,12 +38,18 @@ quotas = [
 ]
 
 [metadata]
-# Optional global fallback, used only when the media and matching center have no GPS.
-# fallback_latitude = 40.7128
-# fallback_longitude = -74.0060
+
+# Missing center values inherit from this table. Latitude and longitude must
+# always be specified together. GPS uncertainty is a horizontal radius in meters.
+# [metadata.defaults.center]
+# latitude = 40.7128
+# longitude = -74.0060
+# timezone = "America/New_York"
+# gps_uncertainty_meters = 250.0
 
 # Repeat for each Kindertales center. Keys are Kindertales center IDs.
 # [metadata.centers."center-123"]
 # latitude = 40.7128
 # longitude = -74.0060
 # timezone = "America/New_York"
+# gps_uncertainty_meters = 50.0

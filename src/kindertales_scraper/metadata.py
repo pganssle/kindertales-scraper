@@ -67,16 +67,19 @@ def fields_for(
         original,
         frozenset({"GPSLatitude", "GPSLongitude", "GPSPosition"}),
     )
-    coordinates = None
-    center = settings.centers.get(activity.center_id or "")
-    if center is not None:
-        coordinates = center.coordinates
-    if coordinates is None:
-        coordinates = settings.fallback_coordinates
+    center = settings.center(activity.center_id)
+    coordinates = center.coordinates
     inferred_gps = not has_gps and coordinates is not None
     if inferred_gps and coordinates is not None:
         fields["EXIF:GPSLatitude"] = str(coordinates.latitude)
         fields["EXIF:GPSLongitude"] = str(coordinates.longitude)
+        if center.gps_uncertainty_meters is not None and not _has(
+            original,
+            frozenset({"GPSHPositioningError"}),
+        ):
+            fields["EXIF:GPSHPositioningError"] = str(
+                center.gps_uncertainty_meters
+            )
 
     if activity.caption is not None and not _has(
         original,
@@ -101,6 +104,9 @@ def fields_for(
             "center_id": activity.center_id,
             "child": child.name,
             "gps_inferred": inferred_gps,
+            "gps_uncertainty_meters": center.gps_uncertainty_meters
+            if inferred_gps
+            else None,
             "time_inferred": inferred_time,
         },
         sort_keys=True,

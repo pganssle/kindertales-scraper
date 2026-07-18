@@ -50,8 +50,26 @@ mode-`0600` plaintext cache and prints a warning.
 Request quotas are repeatable `{ count, window_seconds }` entries. The defaults
 are 8 requests per second, 120 requests per minute, 8 total requests in flight,
 and 2 media downloads. Only increase them when the written authorization allows
-it. Center coordinates and timezones are keyed by Kindertales center ID; the
-optional global coordinates are used only after a center-specific value.
+it.
+
+Discover the linked Kindertales center IDs and configure metadata defaults
+interactively:
+
+```console
+kindertales-scraper configure-centers --headed
+```
+
+The command lists each center with its linked children, then prompts for
+latitude, longitude, IANA timezone, and horizontal GPS uncertainty in meters.
+It updates `config.toml` while retaining existing comments and formatting.
+Latitude and longitude must always be entered together.
+
+Values under `[metadata.centers."CENTER-ID"]` take precedence. Any missing
+coordinate pair, timezone, or uncertainty inherits independently from
+`[metadata.defaults.center]`. This lets the default table describe the common
+daycare location while a specific center overrides only what differs. The
+uncertainty is embedded as `GPSHPositioningError`; it represents a horizontal
+radius in meters, not a claim that the photo was taken at the exact coordinate.
 
 Archive names default to
 `{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}`. The timestamp prefers
@@ -88,9 +106,11 @@ overlap. Archived files are never deleted.
 
 `index.sqlite3` uses a versioned schema with `children`, `activities`, `media`,
 `activity_media`, and `sync_runs` tables. Each enriched file has a versioned JSON
-sidecar containing the source hash, final hash, redacted source URL, complete
+sidecar containing the source hash, final hash, redacted source URL, portable
 pre-edit ExifTool output, scraped context (including structured daily-report
 details and that medium's caption), HTTP properties, and inference flags.
+Host-derived ExifTool fields such as `SourceFile`, `File:Directory`, local file
+timestamps, and permissions are intentionally omitted.
 Sidecars are authoritative where a container cannot embed a field.
 
 The archive contains sensitive information about children. It intentionally uses
