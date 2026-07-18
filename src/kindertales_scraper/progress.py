@@ -12,7 +12,7 @@ class Stage(enum.Enum):
     """A bounded synchronization phase."""
 
     DISCOVERY = ("Discovering activities", "child")
-    RECORDS = ("Archiving records", "page")
+    RECORDS = ("Discovering records", "page")
     MEDIA = ("Archiving media", "file")
 
     @property

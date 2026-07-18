@@ -204,6 +204,33 @@ def test_record_page_requires_aware_observation_time() -> None:
         )
 
 
+def test_record_page_prefers_main_content_and_excludes_subnavigation() -> None:
+    """Full-page snapshots omit shared navigation and selector chrome."""
+    record = discovery.parse_record_page(
+        """
+        <nav>Shared navigation</nav>
+        <main class="main-content">
+          <div class="subNav-content">Child selector</div>
+          <section><h1>Attendance</h1><p>Checked in 9:00 AM</p>
+          <input name="room" value="Preschool"></section>
+        </main>
+        """,
+        category="attendance",
+        source_url="https://example.test/attendance",
+        observed_at=dt.datetime(2026, 7, 18, tzinfo=dt.UTC),
+    )
+    assert record.details == {
+        "text": ("Attendance", "Checked in 9:00 AM"),
+        "fields": {"room": "Preschool"},
+    }
+    assert discovery.parse_record_page(
+        "</div><main>Still visible</main>",
+        category="daily",
+        source_url="https://example.test/",
+        observed_at=dt.datetime(2026, 7, 18, tzinfo=dt.UTC),
+    ).details["text"] == ("Still visible",)
+
+
 @pytest.mark.asyncio
 async def test_adapter_paginates() -> None:
     """The adapter traverses pages and passes continuation cursors."""
@@ -305,7 +332,7 @@ async def test_adapter_uses_request_policy() -> None:
 LEGACY_DASHBOARD = """
 <a href="/index.php?pg=help">Help</a>
 <ul class="children-menu">
-  <li><a href="/index.php?pg=dashboard&amp;cid=child-1">
+  <li><a href="/index.php?pg=dashboard&amp;cid=child-1&amp;clid=center-1">
     <span class="childName">Alex</span>
   </a></li>
   <li><a href="/index.php?pg=dashboard&amp;cid=child-2">
@@ -342,11 +369,33 @@ LEGACY_REPORT = """
 </div>
 """
 
+LEGACY_FEED = """
+<table><tr class="box-shadow-default"><td class="resultdata">
+  <span>9:15 AM</span><div>My Day</div>
+  <a class="html5lightbox image_video"
+     href="https://media.example.test/uploads/photo.JPG?signature=new"></a>
+  <div>@ 1:37 pm</div><div>July 14</div>
+</td></tr></table>
+"""
+
+LEGACY_ATTENDANCE_FEED = """
+<table>
+  <tr class="box-shadow-default"><td>
+    <span>8:05 AM</span><a href="/?pg=attendance&amp;cid=child-1">Checked In</a>
+    <a href="/?pg=unrelated">Details</a><div>July 14</div>
+  </td></tr>
+  <tr class="box-shadow-default"><td>
+    <span>No clock</span><a href="/?cid=child-1">Ignored</a><div>July 14</div>
+  </td></tr>
+  <tr class="box-shadow-default"><td><tr><td>Nested</td></tr></td></tr>
+</table>
+"""
+
 
 def test_parse_legacy_dashboard_children() -> None:
     """Legacy dashboard navigation provides every linked child and name."""
     assert discovery.parse_legacy_children(LEGACY_DASHBOARD) == (
-        discovery.Child("child-1", "Alex"),
+        discovery.Child("child-1", "Alex", "center-1"),
         discovery.Child("child-2", "Sam"),
     )
     assert discovery.parse_legacy_children(
@@ -398,6 +447,48 @@ def test_parse_legacy_daily_report() -> None:
     ) == ()
 
 
+def test_news_feed_supplies_precise_activity_and_publication_times() -> None:
+    """Media correlation replaces midnight without conflating publication time."""
+    activity_date = dt.date(2026, 7, 14)
+    contexts = discovery.parse_notification_context(
+        LEGACY_FEED,
+        activity_date,
+        ZoneInfo("America/New_York"),
+    )
+    activities = discovery.parse_legacy_activities(
+        LEGACY_REPORT,
+        "child-1",
+        activity_date,
+        ZoneInfo("America/New_York"),
+        contexts,
+    )
+    assert activities[0].occurred_at.isoformat() == "2026-07-14T09:15:00-04:00"
+    assert activities[0].details["notification"] == {
+        "text": ("9:15 AM", "My Day", "@ 1:37 pm", "July 14"),
+        "published_at": "2026-07-14T13:37:00-04:00",
+    }
+
+
+def test_news_feed_supplies_non_media_attendance_events() -> None:
+    """Child-linked feed rows retain precise non-media attendance context."""
+    activities = discovery.parse_notification_activities(
+        LEGACY_ATTENDANCE_FEED,
+        "child-1",
+        dt.date(2026, 7, 14),
+        ZoneInfo("America/New_York"),
+    )
+    assert len(activities) == 1
+    assert activities[0].kind == "Checked In"
+    assert activities[0].occurred_at.isoformat() == "2026-07-14T08:05:00-04:00"
+    assert activities[0].media == ()
+    assert not discovery.parse_notification_context(
+        '<tr class="box-shadow-default"><td><a class="image_video" '
+        'href="/photo.jpg"></a><div>July 14</div></td></tr>',
+        dt.date(2026, 7, 14),
+        dt.UTC,
+    )
+
+
 @pytest.mark.asyncio
 async def test_legacy_adapter_traverses_inclusive_dates() -> None:
     """Legacy discovery requests each bounded daily report through the limiter."""
@@ -405,7 +496,12 @@ async def test_legacy_adapter_traverses_inclusive_dates() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        document = LEGACY_DASHBOARD if len(requests) == 1 else LEGACY_REPORT
+        if len(requests) == 1:
+            document = LEGACY_DASHBOARD
+        elif "notificationsV2" in request.url.path:
+            document = LEGACY_FEED + LEGACY_ATTENDANCE_FEED
+        else:
+            document = LEGACY_REPORT
         return httpx.Response(200, text=document)
 
     class Limiter:
@@ -441,10 +537,20 @@ async def test_legacy_adapter_traverses_inclusive_dates() -> None:
                 through_date=dt.date(2026, 7, 15),
             )
         ]
-    assert len(activities) == 4
-    assert requests[1].url.params["activitydate"] == "07/14/2026"
-    assert requests[2].url.params["activitydate"] == "07/15/2026"
-    assert limiter.calls == 3
+        second_child = [
+            item
+            async for item in adapter.activities(
+                "child-2",
+                from_date=dt.date(2026, 7, 16),
+                through_date=dt.date(2026, 7, 16),
+            )
+        ]
+    assert len(activities) == 5
+    assert len(second_child) == 2
+    assert requests[2].url.params["activitydate"] == "07/14/2026"
+    assert requests[3].url.params["activitydate"] == "07/15/2026"
+    assert limiter.calls == 5
+    assert sum("notificationsV2" in request.url.path for request in requests) == 1
 
 
 @pytest.mark.asyncio

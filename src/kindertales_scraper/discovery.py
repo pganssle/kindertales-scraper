@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import html.parser
 import json
+import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
@@ -225,25 +226,60 @@ class _RecordHTMLParser(html.parser.HTMLParser):
         super().__init__()
         self.text: list[str] = []
         self.fields: dict[str, str | bool] = {}
+        self._main_text: list[str] = []
+        self._main_fields: dict[str, str | bool] = {}
         self.title: list[str] = []
         self._ignored_depth = 0
         self._title_depth = 0
+        self._depth = 0
+        self._main_depth = 0
+        self._saw_main = False
 
     def handle_starttag(
         self,
         tag: str,
         attrs_list: list[tuple[str, str | None]],
     ) -> None:
-        if tag in {"script", "style", "svg"}:
-            self._ignored_depth += 1
-            return
+        attributes = dict(attrs_list)
+        classes = _classes(attributes)
+        ignored_region = self._is_ignored_region(tag, attributes, classes)
+        if tag == "main" and "main-content" in classes:
+            self._main_depth = self._depth + 1
+            self._saw_main = True
+        if tag not in {"input", "img", "br", "hr", "meta", "link"}:
+            self._depth += 1
+        if ignored_region and not self._ignored_depth:
+            self._ignored_depth = self._depth
         if self._ignored_depth:
             return
-        attributes = dict(attrs_list)
         if tag in {"title", "h1"} and not self.title:
             self._title_depth += 1
         if tag not in {"input", "select", "textarea"}:
             return
+        field = self._field(attributes)
+        if field is None:
+            return
+        name, value = field
+        self.fields[name] = value
+        if self._main_depth:
+            self._main_fields[name] = value
+
+    @staticmethod
+    def _is_ignored_region(
+        tag: str,
+        attributes: Mapping[str, str | None],
+        classes: frozenset[str],
+    ) -> bool:
+        return (
+            tag in {"script", "style", "svg"}
+            or any(name.casefold().startswith("subnav") for name in classes)
+            or (attributes.get("id") or "").casefold().startswith("subnav")
+        )
+
+    @staticmethod
+    def _field(
+        attributes: Mapping[str, str | None],
+    ) -> tuple[str, str | bool] | None:
         name = attributes.get("name")
         field_type = (attributes.get("type") or "").casefold()
         if (
@@ -251,11 +287,11 @@ class _RecordHTMLParser(html.parser.HTMLParser):
             or field_type in {"hidden", "password", "submit"}
             or any(part in name.casefold() for part in _SECRET_FIELD_PARTS)
         ):
-            return
+            return None
         if field_type in {"checkbox", "radio"}:
-            self.fields[name] = "checked" in attributes
-        elif (value := attributes.get("value")) is not None:
-            self.fields[name] = value
+            return name, "checked" in attributes
+        value = attributes.get("value")
+        return (name, value) if value is not None else None
 
     def handle_data(self, data: str) -> None:
         if self._ignored_depth:
@@ -264,14 +300,30 @@ class _RecordHTMLParser(html.parser.HTMLParser):
         if not value:
             return
         self.text.append(value)
+        if self._main_depth:
+            self._main_text.append(value)
         if self._title_depth:
             self.title.append(value)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style", "svg"} and self._ignored_depth:
-            self._ignored_depth -= 1
-        elif tag in {"title", "h1"} and self._title_depth:
+        if self._depth:
+            self._depth -= 1
+        if self._main_depth and self._depth < self._main_depth:
+            self._main_depth = 0
+        if self._ignored_depth and self._depth < self._ignored_depth:
+            self._ignored_depth = 0
+        if tag in {"title", "h1"} and self._title_depth:
             self._title_depth -= 1
+
+    @property
+    def record_text(self) -> tuple[str, ...]:
+        """Return meaningful main content, falling back for partial fixtures."""
+        return tuple(self._main_text if self._saw_main else self.text)
+
+    @property
+    def record_fields(self) -> Mapping[str, str | bool]:
+        """Return fields within the meaningful main content."""
+        return self._main_fields if self._saw_main else self.fields
 
 
 def parse_record_page(
@@ -294,7 +346,7 @@ def parse_record_page(
         category,
         source_url,
         observed_at,
-        {"text": tuple(parser.text), "fields": parser.fields},
+        {"text": parser.record_text, "fields": parser.record_fields},
         child_id,
         title,
     )
@@ -353,9 +405,13 @@ class _LegacyDashboardParser(html.parser.HTMLParser):
             self._child_name_depth = 0
 
 
-def _child_id(href: str) -> str | None:
-    values = parse_qs(urlsplit(href).query).get("cid")
+def _query_id(href: str, name: str) -> str | None:
+    values = parse_qs(urlsplit(href).query).get(name)
     return values[0] if values and values[0] else None
+
+
+def _child_id(href: str) -> str | None:
+    return _query_id(href, "cid")
 
 
 def parse_legacy_children(document: str) -> tuple[Child, ...]:
@@ -363,11 +419,14 @@ def parse_legacy_children(document: str) -> tuple[Child, ...]:
     parser = _LegacyDashboardParser()
     parser.feed(document)
     names: dict[str, str] = {}
+    centers: dict[str, str] = {}
     linked_ids: list[str] = []
     for anchor in parser.anchors:
         child_id = _child_id(anchor.href)
         if child_id is None:
             continue
+        if center_id := _query_id(anchor.href, "clid"):
+            centers.setdefault(child_id, center_id)
         name = " ".join("".join(anchor.child_name).split())
         if name:
             names.setdefault(child_id, name)
@@ -377,7 +436,11 @@ def parse_legacy_children(document: str) -> tuple[Child, ...]:
     child_ids = list(names)
     child_ids.extend(child_id for child_id in linked_ids if child_id not in names)
     return tuple(
-        Child(child_id, names.get(child_id, f"Child {index}"))
+        Child(
+            child_id,
+            names.get(child_id, f"Child {index}"),
+            centers.get(child_id),
+        )
         for index, child_id in enumerate(child_ids, start=1)
     )
 
@@ -449,6 +512,188 @@ class _LegacyActivityParser(html.parser.HTMLParser):
             self._box = None
 
 
+_CLOCK = re.compile(r"(?i)\b(\d{1,2}):(\d{2})\s*(am|pm)\b")
+
+
+@attrs.frozen
+class FeedContext:
+    """Precise activity and publication context from one news-feed row."""
+
+    occurred_at: dt.datetime
+    published_at: dt.datetime | None
+    text: tuple[str, ...]
+
+
+@attrs.define
+class _FeedRow:
+    media_ids: list[str] = attrs.field(factory=list)
+    child_ids: list[str] = attrs.field(factory=list)
+    text: list[str] = attrs.field(factory=list)
+    span_text: list[str] = attrs.field(factory=list)
+
+
+class _NotificationFeedParser(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[_FeedRow] = []
+        self._row: _FeedRow | None = None
+        self._row_depth = 0
+        self._span_depth = 0
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs_list: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs_list)
+        if (
+            self._row is None
+            and tag == "tr"
+            and "box-shadow-default" in _classes(attributes)
+        ):
+            self._row = _FeedRow()
+            self._row_depth = 1
+            return
+        if self._row is None:
+            return
+        if tag == "tr":
+            self._row_depth += 1
+        if tag == "span":
+            self._span_depth += 1
+        if tag == "a" and (href := attributes.get("href")):
+            split_url = urlsplit(href)
+            source_path = unquote(split_url.path)
+            self._row.child_ids.extend(parse_qs(split_url.query).get("cid", ()))
+            if "image_video" in _classes(attributes):
+                self._row.media_ids.append(
+                    _stable_id(split_url.netloc, source_path)
+                )
+
+    def handle_data(self, data: str) -> None:
+        if self._row is None:
+            return
+        value = " ".join(data.split())
+        if value:
+            self._row.text.append(value)
+            if self._span_depth:
+                self._row.span_text.append(value)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._row is None:
+            return
+        if tag == "span" and self._span_depth:
+            self._span_depth -= 1
+        if tag != "tr":
+            return
+        self._row_depth -= 1
+        if self._row_depth == 0:
+            self.rows.append(self._row)
+            self._row = None
+            self._span_depth = 0
+
+
+def _clock(value: str) -> dt.time | None:
+    match = _CLOCK.search(value)
+    if match is None:
+        return None
+    hour = int(match.group(1)) % 12
+    if match.group(3).casefold() == "pm":
+        hour += 12
+    return dt.time(hour, int(match.group(2)))
+
+
+def parse_notification_context(
+    document: str,
+    activity_date: dt.date,
+    timezone: dt.tzinfo,
+) -> Mapping[str, FeedContext]:
+    """Map media IDs to precise activity context from the family news feed."""
+    parser = _NotificationFeedParser()
+    parser.feed(document)
+    date_label = f"{activity_date:%B} {activity_date.day}"
+    contexts: dict[str, FeedContext] = {}
+    for row in parser.rows:
+        if not row.media_ids or not any(date_label in value for value in row.text):
+            continue
+        occurred_time = next(
+            (
+                parsed
+                for value in row.span_text
+                if (parsed := _clock(value)) is not None
+            ),
+            None,
+        )
+        if occurred_time is None:
+            continue
+        all_times = tuple(
+            parsed for value in row.text if (parsed := _clock(value)) is not None
+        )
+        published_time = next(
+            (value for value in reversed(all_times) if value != occurred_time),
+            None,
+        )
+        context = FeedContext(
+            dt.datetime.combine(activity_date, occurred_time, timezone),
+            dt.datetime.combine(activity_date, published_time, timezone)
+            if published_time is not None
+            else None,
+            tuple(row.text),
+        )
+        contexts.update(dict.fromkeys(row.media_ids, context))
+    return contexts
+
+
+def parse_notification_activities(
+    document: str,
+    child_id: str,
+    activity_date: dt.date,
+    timezone: dt.tzinfo,
+) -> tuple[Activity, ...]:
+    """Extract non-media news-feed events such as check-in and check-out."""
+    parser = _NotificationFeedParser()
+    parser.feed(document)
+    date_label = f"{activity_date:%B} {activity_date.day}"
+    activities = []
+    for row in parser.rows:
+        if (
+            row.media_ids
+            or child_id not in row.child_ids
+            or not any(date_label in value for value in row.text)
+        ):
+            continue
+        occurred_time = next(
+            (
+                parsed
+                for value in row.span_text
+                if (parsed := _clock(value)) is not None
+            ),
+            None,
+        )
+        if occurred_time is None:
+            continue
+        kind = next(
+            (
+                value
+                for value in row.text
+                if _clock(value) is None
+                and date_label not in value
+                and not value.lstrip().startswith("@")
+            ),
+            "News Feed",
+        )
+        activities.append(
+            Activity(
+                _stable_id(child_id, activity_date.isoformat(), *row.text),
+                child_id,
+                kind,
+                dt.datetime.combine(activity_date, occurred_time, timezone),
+                (),
+                details={"notification": {"text": tuple(row.text)}},
+            )
+        )
+    return tuple(activities)
+
+
 def _stable_id(*parts: str) -> str:
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
 
@@ -470,10 +715,13 @@ def parse_legacy_activities(
     child_id: str,
     activity_date: dt.date,
     timezone: dt.tzinfo,
+    feed_context: Mapping[str, FeedContext] | None = None,
 ) -> tuple[Activity, ...]:
     """Extract activity context and media from one legacy daily report."""
     parser = _LegacyActivityParser()
     parser.feed(document)
+    if feed_context is None:
+        feed_context = {}
     activities = []
     for index, box in enumerate(parser.boxes):
         kind = " ".join("".join(box.title).split()) or box.identifier
@@ -506,15 +754,34 @@ def parse_legacy_activities(
             for text in box.text
             if text != kind and not text.casefold().startswith("javascript:")
         )
+        contexts = {
+            context
+            for medium in media
+            if (context := feed_context.get(medium.id)) is not None
+        }
+        context = next(iter(contexts)) if len(contexts) == 1 else None
+        details: dict[str, Any] = {
+            "text": visible_text,
+            "fields": box.fields,
+        }
+        if context is not None:
+            details["notification"] = {
+                "text": context.text,
+                "published_at": context.published_at.isoformat()
+                if context.published_at is not None
+                else None,
+            }
         activities.append(
             Activity(
                 activity_id,
                 child_id,
                 kind,
-                dt.datetime.combine(activity_date, dt.time(), timezone),
+                context.occurred_at
+                if context is not None
+                else dt.datetime.combine(activity_date, dt.time(), timezone),
                 tuple(media),
                 next(iter(captions)) if len(captions) == 1 else None,
-                details={"text": visible_text, "fields": box.fields},
+                details=details,
             )
         )
     return tuple(activities)
@@ -527,6 +794,7 @@ class LegacyKindertalesAdapter:
     client: httpx.AsyncClient
     requester: scheduler.Requester | None = None
     timezone: dt.tzinfo = attrs.field(factory=lambda: ZoneInfo("America/New_York"))
+    _notification_documents: list[str] = attrs.field(factory=list, init=False)
 
     async def get(
         self,
@@ -562,6 +830,7 @@ class LegacyKindertalesAdapter:
         if from_date is None or through_date is None:
             msg = "legacy Kindertales discovery requires --from and --through"
             raise DiscoveryError(msg)
+        notification_document = await self._notification_document()
         current = from_date
         while current <= through_date:
             response = await self.get(
@@ -578,9 +847,31 @@ class LegacyKindertalesAdapter:
                 child_id,
                 current,
                 self.timezone,
+                parse_notification_context(
+                    notification_document,
+                    current,
+                    self.timezone,
+                ),
+            ):
+                yield activity
+            for activity in parse_notification_activities(
+                notification_document,
+                child_id,
+                current,
+                self.timezone,
             ):
                 yield activity
             current += dt.timedelta(days=1)
+
+    async def _notification_document(self) -> str:
+        if not self._notification_documents:
+            response = await self.get(
+                "/modules/notificationsV2/notificationsv2.php",
+                params={"limit": "200", "offset": "0"},
+            )
+            response.raise_for_status()
+            self._notification_documents.append(response.text)
+        return self._notification_documents[0]
 
     async def child_records(self, child_id: str) -> tuple[Record, ...]:
         """Snapshot the read-only report and profile areas for one child."""
