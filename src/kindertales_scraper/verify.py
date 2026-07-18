@@ -238,10 +238,10 @@ class ArchiveVerifier:
             actual = self.exiftool.read(media_path)
         except metadata.MetadataError as error:
             return (VerificationIssue(media_id, str(error)),)
-        actual_by_name = {
-            name.rsplit("]", 1)[-1].rsplit(":", 1)[-1]: value
-            for name, value in actual.items()
-        }
+        actual_by_name: dict[str, object] = {}
+        for name, value in actual.items():
+            tag = name.rsplit("]", 1)[-1].rsplit(":", 1)[-1]
+            actual_by_name.setdefault(tag, value)
         issues = []
         for name, expected in embedded.items():
             tag = name.rsplit("]", 1)[-1].rsplit(":", 1)[-1]

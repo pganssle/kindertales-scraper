@@ -71,8 +71,14 @@ def fields_for(
     coordinates = center.coordinates
     inferred_gps = not has_gps and coordinates is not None
     if inferred_gps and coordinates is not None:
-        fields["EXIF:GPSLatitude"] = str(coordinates.latitude)
-        fields["EXIF:GPSLongitude"] = str(coordinates.longitude)
+        fields["EXIF:GPSLatitude"] = str(abs(coordinates.latitude))
+        fields["EXIF:GPSLatitudeRef"] = (
+            "N" if coordinates.latitude >= 0 else "S"
+        )
+        fields["EXIF:GPSLongitude"] = str(abs(coordinates.longitude))
+        fields["EXIF:GPSLongitudeRef"] = (
+            "E" if coordinates.longitude >= 0 else "W"
+        )
         if center.gps_uncertainty_meters is not None and not _has(
             original,
             frozenset({"GPSHPositioningError"}),

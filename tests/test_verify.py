@@ -99,6 +99,21 @@ def test_valid_historical_sidecar_version(tmp_path: Path, version: int) -> None:
     assert verify.ArchiveVerifier(tmp_path / "archive").run().valid
 
 
+def test_exif_tag_wins_over_composite_tag_with_same_name(tmp_path: Path) -> None:
+    """Composite signed GPS does not mask the stored EXIF coordinate value."""
+    create_archive(tmp_path, embedded_fields={"EXIF:GPSLongitude": "71.123"})
+    report = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool(
+            {
+                "EXIF:GPSLongitude": 71.123,
+                "Composite:GPSLongitude": -71.123,
+            }
+        ),
+    ).run()
+    assert report.valid
+
+
 def test_valid_record_snapshot(tmp_path: Path) -> None:
     """Indexed non-media snapshots participate in archive verification."""
     create_archive(tmp_path)
