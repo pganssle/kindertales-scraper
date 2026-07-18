@@ -64,6 +64,24 @@ def test_empty_history() -> None:
     )
 
 
+@pytest.mark.parametrize("details", [[], {"bad": object()}])
+def test_invalid_activity_details(details: object) -> None:
+    """Structured activity details must be a JSON object."""
+    payload = {
+        "activities": [
+            {
+                "id": "activity",
+                "child_id": "child",
+                "type": "Care",
+                "occurred_at": "2026-07-01T09:00:00-04:00",
+                "details": details,
+            }
+        ]
+    }
+    with pytest.raises(discovery.DiscoveryError, match="details"):
+        discovery.parse_activity_page(payload)
+
+
 @pytest.mark.parametrize(
     ("function", "payload", "message"),
     [
@@ -248,6 +266,8 @@ LEGACY_DASHBOARD = """
 LEGACY_REPORT = """
 <div class="contentBoxes" id="forfun">
   <div class="enrollmentTitle">For Fun</div>
+  <div class="care-details">At 9:15 AM <input name="staff" value="Teacher"></div>
+  <input type="hidden" name="csrf" value="secret">
   <div class="gallery">
     <a class="html5lightbox image_video"
        href="https://media.example.test/uploads/photo.JPG?signature=synthetic"
@@ -303,9 +323,14 @@ def test_parse_legacy_daily_report() -> None:
     assert first[0].kind == "For Fun"
     assert first[0].occurred_at.isoformat() == "2026-07-14T00:00:00-04:00"
     assert first[0].caption == "Building blocks"
+    assert first[0].details == {
+        "fields": {"staff": "Teacher"},
+        "text": ("At 9:15 AM",),
+    }
     assert first[0].media[0].id == second[0].media[0].id
     assert first[0].media[0].content_type == "image/jpeg"
     assert first[0].media[0].filename == "photo.JPG"
+    assert first[0].media[0].caption == "Building blocks"
     assert first[0].media[1].content_type == "video/mp4"
     assert first[1].kind == "activity"
     assert first[1].caption is None

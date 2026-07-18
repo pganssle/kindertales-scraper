@@ -1,17 +1,18 @@
 # kindertales-scraper
 
 `kindertales-scraper` creates a portable SQLite/JSON/media archive of photos and
-videos from every child linked to a Kindertales family account. Activity dates,
-captions, authors, source identifiers, and provenance are retained with each
-medium.
+videos from every child linked to a Kindertales family account. Daily-report
+activities are retained even when they have no media, including visible care
+details and non-secret form values. Activity dates, per-media captions, authors,
+source identifiers, and provenance are retained with each medium.
 
 Kindertales' public terms prohibit automated downloading. Get written
 authorization from Kindertales before using this program. Authorization should
 cover the family account, its linked children, session reuse, and the configured
 request rate. See the [Kindertales Terms of Service](https://www.kindertales.com/terms-of-service/).
 
-The scraper does not cover billing, forms, standalone documents, general
-messages, attendance, or activities without media.
+The scraper does not yet cover billing, forms, standalone documents, general
+messages, or attendance.
 
 ## Installation
 
@@ -79,7 +80,8 @@ overlap. Archived files are never deleted.
 `index.sqlite3` uses a versioned schema with `children`, `activities`, `media`,
 `activity_media`, and `sync_runs` tables. Each enriched file has a versioned JSON
 sidecar containing the source hash, final hash, redacted source URL, complete
-pre-edit ExifTool output, scraped context, HTTP properties, and inference flags.
+pre-edit ExifTool output, scraped context (including structured daily-report
+details and that medium's caption), HTTP properties, and inference flags.
 Sidecars are authoritative where a container cannot embed a field.
 
 The archive contains sensitive information about children. It intentionally uses

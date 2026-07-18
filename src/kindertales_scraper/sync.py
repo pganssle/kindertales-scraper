@@ -293,10 +293,14 @@ class SyncEngine:
                 async for chunk in response.aiter_bytes():
                     stream.write(chunk)
                     digest.update(chunk)
+            metadata_activity = attrs.evolve(
+                activity,
+                caption=medium.caption or activity.caption,
+            )
             enrichment = self.enricher.enrich(
                 temporary,
                 child,
-                activity,
+                metadata_activity,
                 self.settings,
             )
             self.store.store_media(

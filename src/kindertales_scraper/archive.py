@@ -14,8 +14,8 @@ import attrs
 
 from . import config, discovery, redaction
 
-SCHEMA_VERSION = 1
-SIDECAR_VERSION = 1
+SCHEMA_VERSION = 2
+SIDECAR_VERSION = 2
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -180,7 +180,7 @@ class Archive:
 
     def _initialize(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, SCHEMA_VERSION}:
+        if version not in {0, 1, SCHEMA_VERSION}:
             msg = f"unsupported archive schema version: {version}"
             raise ArchiveError(msg)
         self.connection.executescript(
@@ -192,7 +192,8 @@ class Archive:
             CREATE TABLE IF NOT EXISTS activities (
                 id TEXT PRIMARY KEY, child_id TEXT NOT NULL REFERENCES children(id),
                 kind TEXT NOT NULL, occurred_at TEXT NOT NULL, caption TEXT,
-                author TEXT, center_id TEXT, available INTEGER NOT NULL DEFAULT 1
+                author TEXT, center_id TEXT, details_json TEXT NOT NULL DEFAULT '{}',
+                available INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS media (
                 id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE,
@@ -212,6 +213,11 @@ class Archive:
             );
             """
         )
+        if version == 1:
+            self.connection.execute(
+                "ALTER TABLE activities ADD COLUMN details_json "
+                "TEXT NOT NULL DEFAULT '{}'"
+            )
         self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.connection.commit()
 
@@ -229,12 +235,13 @@ class Archive:
         """Insert or update available activity context."""
         self.connection.execute(
             """INSERT INTO activities
-            (id, child_id, kind, occurred_at, caption, author, center_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (id, child_id, kind, occurred_at, caption, author, center_id, details_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET child_id=excluded.child_id,
             kind=excluded.kind, occurred_at=excluded.occurred_at,
             caption=excluded.caption, author=excluded.author,
-            center_id=excluded.center_id, available=1""",
+            center_id=excluded.center_id, details_json=excluded.details_json,
+            available=1""",
             (
                 activity.id,
                 activity.child_id,
@@ -243,6 +250,7 @@ class Archive:
                 activity.caption,
                 activity.author,
                 activity.center_id,
+                json.dumps(activity.details, sort_keys=True),
             ),
         )
         self.connection.commit()
@@ -398,7 +406,9 @@ class Archive:
                 "caption": record.activity.caption,
                 "author": record.activity.author,
                 "center_id": record.activity.center_id,
+                "details": dict(record.activity.details),
             },
+            "media": {"caption": record.medium.caption},
             "archive_path": relative.as_posix(),
             "http": dict(record.http_properties),
             "hashes": {

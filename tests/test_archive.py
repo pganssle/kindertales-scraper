@@ -273,9 +273,34 @@ def test_schema_and_upserts(
         store.upsert_activity(activity)
         version = store.connection.execute("PRAGMA user_version").fetchone()[0]
         row = store.connection.execute("SELECT * FROM children").fetchone()
+        activity_row = store.connection.execute("SELECT * FROM activities").fetchone()
     assert version == archive.SCHEMA_VERSION
     assert row["name"] == "Updated"
     assert row["available"] == 1
+    assert json.loads(activity_row["details_json"]) == {}
+
+
+def test_migrates_version_one_archive(tmp_path: Path) -> None:
+    """Opening a v1 index adds structured activity details without data loss."""
+    path = tmp_path / "index.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE activities (
+            id TEXT PRIMARY KEY, child_id TEXT NOT NULL, kind TEXT NOT NULL,
+            occurred_at TEXT NOT NULL, caption TEXT, author TEXT, center_id TEXT,
+            available INTEGER NOT NULL DEFAULT 1
+        );
+        PRAGMA user_version = 1;
+        """
+    )
+    connection.close()
+    with archive.Archive(tmp_path) as store:
+        columns = {
+            row["name"]
+            for row in store.connection.execute("PRAGMA table_info(activities)")
+        }
+    assert "details_json" in columns
 
 
 def test_reject_newer_schema(tmp_path: Path) -> None:
@@ -323,6 +348,8 @@ def test_store_media_and_sidecar(
     assert sidecar["version"] == archive.SIDECAR_VERSION
     assert sidecar["source"]["url"].endswith("token=REDACTED")
     assert sidecar["metadata"]["original_exiftool"] == {"EXIF:Make": "Camera"}
+    assert sidecar["activity"]["details"] == {}
+    assert sidecar["media"]["caption"] is None
     assert row["source_sha256"] == source_hash == row["final_sha256"]
     assert link["activity_id"] == activity.id
 

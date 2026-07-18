@@ -3,6 +3,7 @@
 import datetime as dt
 import hashlib
 import html.parser
+import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
@@ -36,6 +37,7 @@ class MediaReference:
     url: str
     content_type: str | None = None
     filename: str | None = None
+    caption: str | None = None
 
 
 @attrs.frozen
@@ -50,6 +52,7 @@ class Activity:
     caption: str | None = None
     author: str | None = None
     center_id: str | None = None
+    details: Mapping[str, Any] = attrs.field(factory=dict)
 
 
 @attrs.frozen
@@ -134,6 +137,9 @@ def parse_activity_page(payload: Mapping[str, Any]) -> ActivityPage:
                     filename=str(medium["filename"])
                     if medium.get("filename") is not None
                     else None,
+                    caption=str(medium["caption"])
+                    if medium.get("caption") is not None
+                    else None,
                 )
             )
         activities.append(
@@ -150,6 +156,7 @@ def parse_activity_page(payload: Mapping[str, Any]) -> ActivityPage:
                 center_id=str(item["center_id"])
                 if item.get("center_id") is not None
                 else None,
+                details=_details(item.get("details", {})),
             )
         )
     cursor = payload.get("next_cursor")
@@ -157,6 +164,18 @@ def parse_activity_page(payload: Mapping[str, Any]) -> ActivityPage:
         tuple(activities),
         str(cursor) if cursor is not None else None,
     )
+
+
+def _details(value: object) -> Mapping[str, Any]:
+    if not isinstance(value, dict):
+        msg = "activity details must be an object"
+        raise DiscoveryError(msg)
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError) as error:
+        msg = "activity details must contain JSON values"
+        raise DiscoveryError(msg) from error
+    return value
 
 
 class _ChildHTMLParser(html.parser.HTMLParser):
@@ -270,6 +289,8 @@ class _LegacyBox:
     identifier: str
     title: list[str] = attrs.field(factory=list)
     media: list[_Anchor] = attrs.field(factory=list)
+    text: list[str] = attrs.field(factory=list)
+    fields: dict[str, str] = attrs.field(factory=dict)
 
 
 class _LegacyActivityParser(html.parser.HTMLParser):
@@ -304,10 +325,20 @@ class _LegacyActivityParser(html.parser.HTMLParser):
                 self._box.media.append(
                     _Anchor(href, classes, attributes.get("title"))
                 )
+        if self._box is not None and tag in {"input", "select", "textarea"}:
+            name = attributes.get("name")
+            field_type = (attributes.get("type") or "").casefold()
+            value = attributes.get("value")
+            if name and field_type not in {"hidden", "password"} and value:
+                self._box.fields[name] = value
 
     def handle_data(self, data: str) -> None:
-        if self._box is not None and self._title_depth:
-            self._box.title.append(data)
+        if self._box is not None:
+            if self._title_depth:
+                self._box.title.append(data)
+            normalized = " ".join(data.split())
+            if normalized:
+                self._box.text.append(normalized)
 
     def handle_endtag(self, tag: str) -> None:
         if self._box is None or tag != "div":
@@ -367,8 +398,16 @@ def parse_legacy_activities(
                     anchor.href,
                     _content_type(source_path),
                     PurePosixPath(source_path).name or None,
+                    anchor.title.strip()
+                    if anchor.title and anchor.title.strip()
+                    else None,
                 )
             )
+        visible_text = tuple(
+            text
+            for text in box.text
+            if text != kind and not text.casefold().startswith("javascript:")
+        )
         activities.append(
             Activity(
                 activity_id,
@@ -377,6 +416,7 @@ def parse_legacy_activities(
                 dt.datetime.combine(activity_date, dt.time(), timezone),
                 tuple(media),
                 next(iter(captions)) if len(captions) == 1 else None,
+                details={"text": visible_text, "fields": box.fields},
             )
         )
     return tuple(activities)
