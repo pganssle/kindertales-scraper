@@ -9,7 +9,15 @@ from pathlib import Path
 import httpx
 import pytest
 
-from kindertales_scraper import archive, config, discovery, metadata, scheduler, sync
+from kindertales_scraper import (
+    archive,
+    config,
+    discovery,
+    metadata,
+    progress,
+    scheduler,
+    sync,
+)
 
 
 class ImmediateLimiter:
@@ -72,6 +80,22 @@ class FakeEnricher:
         )
 
 
+class RecordingReporter:
+    """Record synchronization progress events."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, progress.Stage, int] | tuple[str]] = []
+
+    def start(self, stage: progress.Stage, total: int) -> None:
+        self.events.append(("start", stage, total))
+
+    def advance(self, stage: progress.Stage) -> None:
+        self.events.append(("advance", stage, 1))
+
+    def close(self) -> None:
+        self.events.append(("close",))
+
+
 @pytest.fixture
 def records() -> tuple[discovery.Child, tuple[discovery.Activity, ...]]:
     """Return two activities which reference the same medium."""
@@ -112,6 +136,7 @@ async def engine(
     tmp_path: Path,
     adapter: FakeAdapter,
     handler: httpx.AsyncBaseTransport,
+    reporter: progress.Reporter | None = None,
 ) -> AsyncIterator[tuple[sync.SyncEngine, archive.Archive]]:
     """Yield an engine with open HTTP and archive resources."""
     configuration = settings(tmp_path)
@@ -128,15 +153,21 @@ async def engine(
                     store,
                     requester,
                     FakeEnricher(),
+                    reporter or progress.NullReporter(),
                 ),
                 store,
             )
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "returned_content_type",
+    ["image/jpeg", "image/jpg", "IMAGE/PJPEG; charset=binary"],
+)
 async def test_sync_downloads_deduplicates_and_archives(
     tmp_path: Path,
     records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+    returned_content_type: str,
 ) -> None:
     """A complete run downloads duplicate media once and links every activity."""
     child, activities = records
@@ -146,11 +177,19 @@ async def test_sync_downloads_deduplicates_and_archives(
         nonlocal requests
         requests += 1
         return httpx.Response(
-            200, content=b"source", headers={"Content-Type": "image/jpeg"}
+            200,
+            content=b"source",
+            headers={"Content-Type": returned_content_type},
         )
 
     adapter = FakeAdapter((child,), activities)
-    async for runner, store in engine(tmp_path, adapter, httpx.MockTransport(handler)):
+    reporter = RecordingReporter()
+    async for runner, store in engine(
+        tmp_path,
+        adapter,
+        httpx.MockTransport(handler),
+        reporter,
+    ):
         summary = await runner.run()
         media_row = store.connection.execute("SELECT * FROM media").fetchone()
         links = store.connection.execute("SELECT * FROM activity_media").fetchall()
@@ -165,6 +204,13 @@ async def test_sync_downloads_deduplicates_and_archives(
         (settings(tmp_path).archive_directory / media_row["sidecar_path"]).read_text()
     )
     assert sidecar["metadata"]["inferred_time"] is True
+    assert reporter.events == [
+        ("start", progress.Stage.DISCOVERY, 1),
+        ("advance", progress.Stage.DISCOVERY, 1),
+        ("start", progress.Stage.MEDIA, 1),
+        ("advance", progress.Stage.MEDIA, 1),
+        ("close",),
+    ]
 
 
 @pytest.mark.asyncio

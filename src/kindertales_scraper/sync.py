@@ -10,7 +10,16 @@ from typing import Protocol, cast
 import attrs
 import httpx
 
-from . import archive, auth, config, credentials, discovery, metadata, scheduler
+from . import (
+    archive,
+    auth,
+    config,
+    credentials,
+    discovery,
+    metadata,
+    progress,
+    scheduler,
+)
 
 
 class SyncError(RuntimeError):
@@ -88,6 +97,7 @@ class SyncEngine:
     store: archive.Archive
     requester: scheduler.Requester
     enricher: Enricher
+    reporter: progress.Reporter = attrs.field(factory=progress.NullReporter)
 
     async def run(
         self,
@@ -102,6 +112,7 @@ class SyncEngine:
         cursors = dict(self.store.latest_cursors())
         try:
             children = await self.adapter.children()
+            self.reporter.start(progress.Stage.DISCOVERY, len(children))
             activities: list[tuple[discovery.Child, discovery.Activity]] = []
             for child in children:
                 effective_from = self._effective_from(
@@ -118,6 +129,7 @@ class SyncEngine:
                         if self._included(activity, bounds)
                     ]
                 )
+                self.reporter.advance(progress.Stage.DISCOVERY)
             media_count = len(
                 {medium.id for _, item in activities for medium in item.media}
             )
@@ -159,6 +171,8 @@ class SyncEngine:
             if run_id is not None:
                 self.store.finish_sync(run_id, "failed", cursors)
             raise
+        finally:
+            self.reporter.close()
 
     def _effective_from(
         self, requested: dt.date | None, cursor: str | None
@@ -216,6 +230,7 @@ class SyncEngine:
                 selected_medium: discovery.MediaReference = medium,
             ) -> None:
                 await self._download(selected_child, selected_activity, selected_medium)
+                self.reporter.advance(progress.Stage.MEDIA)
 
             graph.add(
                 scheduler.Work(
@@ -227,6 +242,7 @@ class SyncEngine:
                     order=order,
                 )
             )
+        self.reporter.start(progress.Stage.MEDIA, len(first_media))
         results = await graph.run()
         failures = tuple(
             result.error
@@ -254,12 +270,17 @@ class SyncEngine:
         temporary: Path | None = None
         try:
             response.raise_for_status()
-            content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
-            if not content_type.startswith(("image/", "video/")):
+            content_type = (
+                response.headers.get("Content-Type", "").split(";", 1)[0].strip()
+            )
+            canonical_content_type = _canonical_media_type(content_type)
+            if not canonical_content_type.startswith(("image/", "video/")):
                 received = content_type or "missing"
                 msg = f"refusing unexpected media content type: {received}"
                 raise SyncError(msg)
-            if medium.content_type is not None and content_type != medium.content_type:
+            if medium.content_type is not None and (
+                canonical_content_type != _canonical_media_type(medium.content_type)
+            ):
                 msg = f"media content type differs from discovery: {content_type}"
                 raise SyncError(msg)
             temporary_directory = self.store.root / ".tmp"
@@ -390,5 +411,14 @@ async def run_configured(  # pragma: no cover - exercised by the authorized smok
                 store,
                 requester,
                 metadata.ExifTool(),
+                progress.TerminalReporter(),
             )
             return await engine.run(bounds, dry_run=dry_run)
+
+
+def _canonical_media_type(value: str) -> str:
+    normalized = value.strip().casefold()
+    return {"image/jpg": "image/jpeg", "image/pjpeg": "image/jpeg"}.get(
+        normalized,
+        normalized,
+    )
