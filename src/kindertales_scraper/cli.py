@@ -66,6 +66,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             prefix = f"{issue.media_id}: " if issue.media_id is not None else ""
             print(f"{prefix}{issue.message}")  # noqa: T201
         if report.valid:
-            print(f"verified {report.checked_media} media files")  # noqa: T201
+            print(  # noqa: T201
+                f"verified {report.checked_media} media files and "
+                f"{report.checked_records} records"
+            )
         return 0 if report.valid else 1
     return 0

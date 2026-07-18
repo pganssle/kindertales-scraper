@@ -16,7 +16,12 @@ enrollment, immunization, medication, milestone, and profile/document pages for
 each child. These snapshots retain visible text and non-secret field values;
 they don't yet download linked standalone documents.
 
-Messages and billing aren't exported yet.
+Message-folder listings and the billing dashboard are separately opt-in because
+they can contain private correspondence and financial information. Set
+`messages = true` and/or `billing = true` under `[exports]` only when those
+areas are covered by the written authorization and should be included in this
+archive. The message snapshots cover inbox, sent, draft, scheduled, and contact
+listings; they don't yet follow individual messages or download attachments.
 
 ## Installation
 

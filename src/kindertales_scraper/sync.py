@@ -56,6 +56,16 @@ class RecordAdapter(Protocol):
         """Return record-area snapshots for one child."""
         ...
 
+    async def account_records(
+        self,
+        *,
+        messages: bool,
+        billing: bool,
+    ) -> tuple[discovery.Record, ...]:
+        """Return enabled account-level record snapshots."""
+        ...
+
+
 class Enricher(Protocol):
     """Metadata enrichment operation required by synchronization."""
 
@@ -143,7 +153,7 @@ class SyncEngine:
                     ]
                 )
                 self.reporter.advance(progress.Stage.DISCOVERY)
-            records = await self._discover_records(children)
+            records = await self._discover_records_with_progress(children)
             media_count = len(
                 {medium.id for _, item in activities for medium in item.media}
             )
@@ -209,7 +219,35 @@ class SyncEngine:
                     (child, record)
                     for record in await self.adapter.child_records(child.id)
                 )
+        if self.settings.exports.messages or self.settings.exports.billing:
+            records.extend(
+                (None, record)
+                for record in await self.adapter.account_records(
+                    messages=self.settings.exports.messages,
+                    billing=self.settings.exports.billing,
+                )
+            )
         return records
+
+    async def _discover_records_with_progress(
+        self,
+        children: Sequence[discovery.Child],
+    ) -> list[tuple[discovery.Child | None, discovery.Record]]:
+        requests = self._record_request_count(children)
+        if requests:
+            self.reporter.start(progress.Stage.RECORDS, requests)
+        records = await self._discover_records(children)
+        for _ in range(requests):
+            self.reporter.advance(progress.Stage.RECORDS)
+        return records
+
+    def _record_request_count(self, children: Sequence[discovery.Child]) -> int:
+        if not isinstance(self.adapter, RecordAdapter):
+            return 0
+        child_pages = 7 * len(children) if self.settings.exports.child_records else 0
+        message_pages = 5 if self.settings.exports.messages else 0
+        billing_pages = 1 if self.settings.exports.billing else 0
+        return child_pages + message_pages + billing_pages
 
     def _effective_from(
         self, requested: dt.date | None, cursor: str | None

@@ -26,6 +26,9 @@ application:
   values, bearer tokens, or signed query values;
 - source and final hashes verify, and authentic capture/GPS fields are unchanged;
 - missing time/GPS values use activity and center context with inference flags;
+- enabled child, message, and billing snapshots are counted and verified;
+- an optional record area that redirects to the dashboard is skipped while
+  other record areas continue;
 - a second run is idempotent and uses the configured overlap.
 
 Delete the smoke archive after review unless its retention is part of the

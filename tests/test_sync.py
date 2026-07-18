@@ -71,11 +71,25 @@ class FakeRecordAdapter(FakeAdapter):
         activities: tuple[discovery.Activity, ...],
     ) -> None:
         super().__init__(children, activities)
+        self.account_options: list[tuple[bool, bool]] = []
 
     async def child_records(
         self, child_id: str
     ) -> tuple[discovery.Record, ...]:
         return (self._record("profile", child_id),)
+
+    async def account_records(
+        self,
+        *,
+        messages: bool,
+        billing: bool,
+    ) -> tuple[discovery.Record, ...]:
+        self.account_options.append((messages, billing))
+        return tuple(
+            self._record(category)
+            for category, enabled in (("messages", messages), ("billing", billing))
+            if enabled
+        )
 
     @staticmethod
     def _record(category: str, child_id: str | None = None) -> discovery.Record:
@@ -160,15 +174,15 @@ def settings(tmp_path: Path) -> config.Config:
 
 
 @pytest.mark.asyncio
-async def test_sync_archives_enabled_child_records(
+async def test_sync_archives_enabled_records(
     tmp_path: Path,
     records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
 ) -> None:
-    """Configured child snapshots join the same sync run."""
+    """Configured child, message, and billing snapshots join the same sync run."""
     child, _activities = records
     configuration = attrs.evolve(
         settings(tmp_path),
-        exports=config.Exports(child_records=True),
+        exports=config.Exports(child_records=True, messages=True, billing=True),
     )
     adapter = FakeRecordAdapter((child,), ())
     transport = httpx.MockTransport(lambda _request: httpx.Response(500))
@@ -186,8 +200,9 @@ async def test_sync_archives_enabled_child_records(
             )
             summary = await runner.run(dry_run=False)
             rows = store.connection.execute("SELECT * FROM records").fetchall()
-    assert summary.records == 1
-    assert len(rows) == 1
+    assert summary.records == 3
+    assert len(rows) == 3
+    assert adapter.account_options == [(True, True)]
     assert all("REDACTED" in row["source_url"] for row in rows)
 
 
@@ -218,6 +233,7 @@ async def test_record_discovery_respects_disabled_exports(
             )
             summary = await runner.run(dry_run=True)
     assert summary.records == 0
+    assert adapter.account_options == []
 
 
 async def engine(

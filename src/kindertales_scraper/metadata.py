@@ -37,6 +37,11 @@ def _tag_name(value: str) -> str:
     return value.rsplit("]", 1)[-1].rsplit(":", 1)[-1]
 
 
+def _iptc_text(value: str) -> str:
+    """Return the value ExifTool can represent in legacy IPTC text fields."""
+    return value.encode("latin-1", errors="replace").decode("latin-1")
+
+
 def fields_for(
     original: Mapping[str, Any],
     child: discovery.Child,
@@ -78,13 +83,13 @@ def fields_for(
         frozenset({"Description", "Caption-Abstract"}),
     ):
         fields["XMP-dc:Description"] = activity.caption
-        fields["IPTC:Caption-Abstract"] = activity.caption
+        fields["IPTC:Caption-Abstract"] = _iptc_text(activity.caption)
     if activity.author is not None and not _has(
         original,
         frozenset({"Artist", "Creator", "By-line"}),
     ):
         fields["XMP-dc:Creator"] = activity.author
-        fields["IPTC:By-line"] = activity.author
+        fields["IPTC:By-line"] = _iptc_text(activity.author)
 
     fields["XMP-dc:Source"] = "Kindertales"
     fields["XMP-xmp:Identifier"] = ";".join(

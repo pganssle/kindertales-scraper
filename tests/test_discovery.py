@@ -477,6 +477,55 @@ async def test_legacy_adapter_snapshots_child_record_routes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_legacy_adapter_snapshots_enabled_account_routes() -> None:
+    """Message folders and billing are independently opt-in snapshots."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.params.get("subpg") == "scheduled":
+            return httpx.Response(
+                302,
+                headers={"Location": "index.php?pg=dashboard"},
+            )
+        return httpx.Response(200, text="<p>Synthetic</p>")
+
+    async with httpx.AsyncClient(
+        base_url="https://example.test", transport=httpx.MockTransport(handler)
+    ) as client:
+        adapter = discovery.LegacyKindertalesAdapter(client)
+        assert await adapter.account_records(messages=False, billing=False) == ()
+        records = await adapter.account_records(messages=True, billing=True)
+    assert [record.category for record in records] == [
+        "messages_inbox",
+        "messages_sent",
+        "messages_draft",
+        "messages_contacts",
+        "billing",
+    ]
+    assert requests[0].url.params["subpg"] == "inbox"
+    assert requests[4].url.params["subpg"] == "contacts"
+    assert "subpg" not in requests[5].url.params
+
+
+@pytest.mark.asyncio
+async def test_account_record_redirect_does_not_hide_authentication_failure() -> None:
+    """Only a known unavailable-area redirect is skipped."""
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            302,
+            headers={"Location": "index.php?pg=login"},
+        )
+    )
+    async with httpx.AsyncClient(
+        base_url="https://example.test", transport=transport
+    ) as client:
+        adapter = discovery.LegacyKindertalesAdapter(client)
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter.account_records(messages=False, billing=True)
+
+
+@pytest.mark.asyncio
 async def test_legacy_adapter_requires_explicit_bounds() -> None:
     """The HTML adapter refuses an accidental unbounded history traversal."""
     async with httpx.AsyncClient(base_url="https://example.test") as client:

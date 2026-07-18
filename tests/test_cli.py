@@ -98,7 +98,10 @@ def test_sync_command(
 @pytest.mark.parametrize(
     ("report", "expected"),
     [
-        (verify.VerificationReport(2, ()), (0, "verified 2 media files\n")),
+        (
+            verify.VerificationReport(2, (), 3),
+            (0, "verified 2 media files and 3 records\n"),
+        ),
         (
             verify.VerificationReport(
                 1,

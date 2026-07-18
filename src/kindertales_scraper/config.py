@@ -198,6 +198,8 @@ class Exports:
     """Optional non-media account areas included in synchronization."""
 
     child_records: bool = True
+    messages: bool = False
+    billing: bool = False
 
 
 @attrs.frozen
@@ -341,6 +343,8 @@ def load(path: Path) -> Config:
         fallback_coordinates=_coordinates(metadata, "fallback_"),
         exports=Exports(
             child_records=bool(exports.get("child_records", True)),
+            messages=bool(exports.get("messages", False)),
+            billing=bool(exports.get("billing", False)),
         ),
     )
 
@@ -357,7 +361,7 @@ def write_initial(path: Path, email: str) -> None:
         'folder_frequency = "none"\n'
         'filename_format = "{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}"\n'
         'sidecar_layout = "adjacent"\n'
-        "\n[exports]\nchild_records = true\n"
+        "\n[exports]\nchild_records = true\nmessages = false\nbilling = false\n"
     )
     path.write_text(content, encoding="utf-8")
     path.chmod(0o600)

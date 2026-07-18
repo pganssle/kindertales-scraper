@@ -16,6 +16,7 @@ from . import config, discovery, redaction
 
 SCHEMA_VERSION = 3
 SIDECAR_VERSION = 2
+RECORD_VERSION = 1
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -243,7 +244,7 @@ class Archive:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_suffix(".json.tmp")
         document = {
-            "version": 1,
+            "version": RECORD_VERSION,
             "id": record.id,
             "category": record.category,
             "child_id": record.child_id,

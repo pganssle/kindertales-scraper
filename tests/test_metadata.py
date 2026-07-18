@@ -5,6 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import attrs
 import pytest
 
 from kindertales_scraper import config, discovery, metadata
@@ -119,6 +120,19 @@ def test_optional_caption_and_author(
     fields, _, _ = metadata.fields_for({}, child, activity, settings())
     assert "XMP-dc:Description" not in fields
     assert "XMP-dc:Creator" not in fields
+
+
+def test_legacy_iptc_text_has_a_representable_readback(
+    context: tuple[discovery.Child, discovery.Activity],
+) -> None:
+    """XMP preserves Unicode while legacy IPTC uses its Latin-1 representation."""
+    child, activity = context
+    activity = attrs.evolve(activity, caption="Caption \ufffd", author="Teacher \u2014")
+    fields, _, _ = metadata.fields_for({}, child, activity, settings())
+    assert fields["XMP-dc:Description"] == "Caption \ufffd"
+    assert fields["IPTC:Caption-Abstract"] == "Caption ?"
+    assert fields["XMP-dc:Creator"] == "Teacher \u2014"
+    assert fields["IPTC:By-line"] == "Teacher ?"
 
 
 class FakeRunner:

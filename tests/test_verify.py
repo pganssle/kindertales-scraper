@@ -64,6 +64,19 @@ def create_archive(
     return media_path, media_path.with_suffix(media_path.suffix + ".json")
 
 
+def create_record(tmp_path: Path) -> Path:
+    """Add one valid synthetic account record and return its snapshot path."""
+    record = discovery.Record(
+        "record",
+        "messages_inbox",
+        "https://example.test/?token=secret",
+        dt.datetime(2026, 7, 18, tzinfo=dt.UTC),
+        {"text": ["Synthetic"]},
+    )
+    with archive.Archive(tmp_path / "archive") as store:
+        return store.store_record(record)
+
+
 def test_valid_archive(tmp_path: Path) -> None:
     """Matching database, files, sidecars, hashes, and metadata are valid."""
     media_path, _ = create_archive(tmp_path)
@@ -74,6 +87,68 @@ def test_valid_archive(tmp_path: Path) -> None:
     assert report == verify.VerificationReport(1, ())
     assert report.valid
     assert media_path.is_file()
+
+
+def test_valid_record_snapshot(tmp_path: Path) -> None:
+    """Indexed non-media snapshots participate in archive verification."""
+    create_archive(tmp_path)
+    create_record(tmp_path)
+    report = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool({"[XMP-dc]Source": ["Kindertales"]}),  # type: ignore[arg-type]
+    ).run()
+    assert report.valid
+    assert report.checked_records == 1
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("escape", "escapes"),
+        ("missing", "missing"),
+        ("invalid", "valid UTF-8 JSON"),
+        ("array", "JSON object"),
+        ("version", "version"),
+        ("id", "ID"),
+        ("details", "details"),
+        ("indexed-details", "details"),
+    ],
+)
+def test_invalid_record_snapshot(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    """Record paths, JSON, identity, version, and indexed details are checked."""
+    create_archive(tmp_path)
+    path = create_record(tmp_path)
+    database = tmp_path / "archive/index.sqlite3"
+    if mutation == "escape":
+        with sqlite3.connect(database) as connection:
+            connection.execute("UPDATE records SET relative_path='../record.json'")
+    elif mutation == "missing":
+        path.unlink()
+    elif mutation == "invalid":
+        path.write_bytes(b"\xff")
+    elif mutation == "array":
+        path.write_text("[]", encoding="utf-8")
+    elif mutation == "indexed-details":
+        with sqlite3.connect(database) as connection:
+            connection.execute("UPDATE records SET details_json='not-json'")
+    else:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if mutation == "version":
+            document["version"] = 999
+        elif mutation == "id":
+            document["id"] = "other"
+        else:
+            document["details"] = {"different": True}
+        path.write_text(json.dumps(document), encoding="utf-8")
+    report = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool({"[XMP-dc]Source": ["Kindertales"]}),  # type: ignore[arg-type]
+    ).run()
+    assert any(message in issue.message for issue in report.issues)
 
 
 @pytest.mark.parametrize(

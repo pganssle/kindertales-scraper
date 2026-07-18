@@ -611,6 +611,48 @@ class LegacyKindertalesAdapter:
             )
         return tuple(records)
 
+    async def account_records(
+        self,
+        *,
+        messages: bool,
+        billing: bool,
+    ) -> tuple[Record, ...]:
+        """Snapshot enabled account-level communications and financial pages."""
+        routes: list[tuple[str, str, str | None]] = []
+        if messages:
+            routes.extend(
+                (f"messages_{subpage}", "messagecentre", subpage)
+                for subpage in ("inbox", "sent", "draft", "scheduled", "contacts")
+            )
+        if billing:
+            routes.append(("billing", "pbilling", None))
+        records = []
+        for category, page, subpage in routes:
+            params = {"pg": page}
+            if subpage is not None:
+                params["subpg"] = subpage
+            response = await self.get("/index.php", params=params)
+            if _dashboard_redirect(response):
+                continue
+            response.raise_for_status()
+            records.append(
+                parse_record_page(
+                    response.text,
+                    category=category,
+                    source_url=str(response.url),
+                    observed_at=dt.datetime.now(dt.UTC),
+                )
+            )
+        return tuple(records)
+
+
+def _dashboard_redirect(response: httpx.Response) -> bool:
+    if not response.is_redirect:
+        return False
+    location = response.headers.get("Location", "")
+    return parse_qs(urlsplit(location).query).get("pg") == ["dashboard"]
+
+
 @attrs.frozen
 class KindertalesAdapter:
     """Read-only adapter for the routes observed in an authorized session."""

@@ -25,6 +25,8 @@ filename_format = "{child_name}_{timestamp:%Y%m%d}_{sequence:03d}{extension}"
 sidecar_layout = "parallel"
 [exports]
 child_records = false
+messages = true
+billing = true
 [synchronization]
 overlap_days = 4
 [request_policy]
@@ -60,7 +62,11 @@ timezone = "America/New_York"
         sidecar_layout=config.SidecarLayout.PARALLEL,
     )
     assert loaded.overlap_days == 4
-    assert loaded.exports == config.Exports(child_records=False)
+    assert loaded.exports == config.Exports(
+        child_records=False,
+        messages=True,
+        billing=True,
+    )
     assert loaded.request_policy == config.RequestPolicy(
         quotas=(config.Quota(5, 2.0),),
         max_in_flight=4,
