@@ -17,6 +17,7 @@ from . import (
     credentials,
     discovery,
     metadata,
+    names,
     progress,
     scheduler,
 )
@@ -120,6 +121,9 @@ class SyncEngine:
     requester: scheduler.Requester
     enricher: Enricher
     reporter: progress.Reporter = attrs.field(factory=progress.NullReporter)
+    name_resolver: names.PassthroughResolver | names.InteractiveResolver = attrs.field(
+        factory=names.PassthroughResolver
+    )
 
     async def run(
         self,
@@ -133,7 +137,7 @@ class SyncEngine:
         run_id = None if dry_run else self.store.begin_sync()
         cursors = dict(self.store.latest_cursors())
         try:
-            children = await self.adapter.children()
+            children = self.name_resolver.resolve(await self.adapter.children())
             self.reporter.start(progress.Stage.DISCOVERY, len(children))
             activities: list[tuple[discovery.Child, discovery.Activity]] = []
             records: list[tuple[discovery.Child | None, discovery.Record]] = []
@@ -494,6 +498,7 @@ async def run_configured(  # pragma: no cover - exercised by the authorized smok
                 requester,
                 metadata.ExifTool(),
                 progress.TerminalReporter(),
+                names.InteractiveResolver(settings),
             )
             return await engine.run(bounds, dry_run=dry_run)
 

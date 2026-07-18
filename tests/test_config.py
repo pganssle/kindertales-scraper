@@ -27,6 +27,10 @@ sidecar_layout = "parallel"
 child_records = false
 messages = true
 billing = true
+[children]
+use_kindertales_name = false
+[children.names]
+"Child-2" = "Mark"
 [synchronization]
 overlap_days = 4
 [request_policy]
@@ -67,6 +71,9 @@ timezone = "America/New_York"
         messages=True,
         billing=True,
     )
+    assert loaded.child_names == {"Child-2": "Mark"}
+    assert not loaded.use_kindertales_name
+    assert loaded.source_path == path
     assert loaded.request_policy == config.RequestPolicy(
         quotas=(config.Quota(5, 2.0),),
         max_in_flight=4,
@@ -141,6 +148,14 @@ timezone = "America/New_York"
         (
             "[account]\nemail='a@b'\n[archive]\nfolder_format='{sequence:nope}'",
             "folder_format has an invalid format specification",
+        ),
+        (
+            "[account]\nemail='a@b'\n[children]\nnames=[]",
+            "children.names",
+        ),
+        (
+            "[account]\nemail='a@b'\n[children.names]\nChild=''",
+            "children.names",
         ),
     ],
 )

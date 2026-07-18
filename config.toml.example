@@ -17,6 +17,12 @@ child_records = true
 messages = false # Inbox, sent, draft, scheduled, and contact listings.
 billing = false # Billing dashboard, including payment-related information.
 
+[children]
+use_kindertales_name = false
+
+[children.names]
+# "Child-2" = "Mark"
+
 [synchronization]
 overlap_days = 7
 

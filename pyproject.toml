@@ -18,6 +18,7 @@ dependencies = [
     "platformdirs>=4.3",
     "playwright>=1.51",
     "tqdm>=4.67",
+    "tomlkit>=0.13",
 ]
 
 [project.optional-dependencies]

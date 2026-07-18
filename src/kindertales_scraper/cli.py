@@ -5,7 +5,7 @@ import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, auth, config, credentials, sync, verify
+from . import __version__, auth, config, credentials, names, sync, verify
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,14 +46,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         credentials.delete(settings.email)
     elif arguments.command == "sync":
         settings = config.load(arguments.config)
-        summary = asyncio.run(
-            sync.run_configured(
-                settings,
-                sync.Bounds(arguments.from_date, arguments.through_date),
-                dry_run=arguments.dry_run,
-                headed=arguments.headed,
+        try:
+            summary = asyncio.run(
+                sync.run_configured(
+                    settings,
+                    sync.Bounds(arguments.from_date, arguments.through_date),
+                    dry_run=arguments.dry_run,
+                    headed=arguments.headed,
+                )
             )
-        )
+        except names.NameConfigurationRequiredError:
+            return 2
         print(  # noqa: T201 - this is the command-line presentation boundary.
             f"{summary.children} children, {summary.activities} activities, "
             f"{summary.media} media, {summary.records} records"

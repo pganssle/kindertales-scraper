@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from kindertales_scraper import __version__, cli, credentials, sync, verify
+from kindertales_scraper import __version__, cli, credentials, names, sync, verify
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -93,6 +93,21 @@ def test_sync_command(
     assert capsys.readouterr().out == (
         "2 children, 3 activities, 4 media, 0 records (dry run)\n"
     )
+
+
+def test_sync_exits_after_printing_manual_name_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Manual preferred-name configuration exits without a traceback."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[account]\nemail="a@example.com"', encoding="utf-8")
+
+    async def run(*_args: object, **_kwargs: object) -> sync.SyncSummary:
+        raise names.NameConfigurationRequiredError
+
+    monkeypatch.setattr(sync, "run_configured", run)
+    assert cli.main(("sync", "--config", str(config_path))) == 2
 
 
 @pytest.mark.parametrize(

@@ -216,6 +216,9 @@ class Config:
     centers: Mapping[str, Center] = attrs.field(factory=dict)
     fallback_coordinates: Coordinates | None = None
     exports: Exports = Exports()
+    child_names: Mapping[str, str] = attrs.field(factory=dict)
+    use_kindertales_name: bool = False
+    source_path: Path | None = attrs.field(default=None, eq=False)
 
     def __attrs_post_init__(self) -> None:
         """Validate account and synchronization settings."""
@@ -257,6 +260,7 @@ def load(path: Path) -> Config:
     policy_data = _table(data, "request_policy")
     metadata = _table(data, "metadata")
     exports = _table(data, "exports")
+    children = _table(data, "children")
 
     raw_quotas = policy_data.get(
         "quotas",
@@ -295,6 +299,13 @@ def load(path: Path) -> Config:
     email = account.get("email")
     if not isinstance(email, str):
         msg = "account.email is required"
+        raise ConfigError(msg)
+    raw_child_names = children.get("names", {})
+    if not isinstance(raw_child_names, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) and value
+        for key, value in raw_child_names.items()
+    ):
+        msg = "children.names must map Kindertales names to preferred names"
         raise ConfigError(msg)
     try:
         folder_frequency = FolderFrequency(
@@ -346,6 +357,9 @@ def load(path: Path) -> Config:
             messages=bool(exports.get("messages", False)),
             billing=bool(exports.get("billing", False)),
         ),
+        child_names=dict(raw_child_names),
+        use_kindertales_name=bool(children.get("use_kindertales_name", False)),
+        source_path=path,
     )
 
 
@@ -362,6 +376,7 @@ def write_initial(path: Path, email: str) -> None:
         'filename_format = "{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}"\n'
         'sidecar_layout = "adjacent"\n'
         "\n[exports]\nchild_records = true\nmessages = false\nbilling = false\n"
+        "\n[children]\nuse_kindertales_name = false\n"
     )
     path.write_text(content, encoding="utf-8")
     path.chmod(0o600)
