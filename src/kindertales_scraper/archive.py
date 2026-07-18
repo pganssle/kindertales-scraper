@@ -171,6 +171,19 @@ class Archive:
         """Return this open archive."""
         return self
 
+    @classmethod
+    def memory(cls, layout: config.ArchiveLayout | None = None) -> Self:
+        """Create a schema-compatible in-memory store for a dry run."""
+        instance = cls.__new__(cls)
+        instance.root = Path()
+        instance.layout = layout or config.ArchiveLayout()
+        instance.database_path = Path(":memory:")
+        instance.connection = sqlite3.connect(":memory:")
+        instance.connection.row_factory = sqlite3.Row
+        instance.connection.execute("PRAGMA foreign_keys = ON")
+        instance._initialize()  # noqa: SLF001 - alternate constructor
+        return instance
+
     def __exit__(self, *_args: object) -> None:
         """Close the archive on context exit."""
         self.close()

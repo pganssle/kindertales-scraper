@@ -369,6 +369,13 @@ def test_reject_newer_schema(tmp_path: Path) -> None:
         archive.Archive(tmp_path)
 
 
+def test_in_memory_archive_does_not_create_files(tmp_path: Path) -> None:
+    """Dry-run storage provides the schema without touching its working directory."""
+    with archive.Archive.memory() as store:
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert not tuple(tmp_path.iterdir())
+
+
 def test_store_media_and_sidecar(
     tmp_path: Path,
     entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
