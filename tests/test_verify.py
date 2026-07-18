@@ -89,6 +89,16 @@ def test_valid_archive(tmp_path: Path) -> None:
     assert media_path.is_file()
 
 
+@pytest.mark.parametrize("version", [1, 2])
+def test_valid_historical_sidecar_version(tmp_path: Path, version: int) -> None:
+    """Verification remains compatible with sidecars written by older releases."""
+    _, sidecar = create_archive(tmp_path, ".bin")
+    document = json.loads(sidecar.read_text(encoding="utf-8"))
+    document["version"] = version
+    sidecar.write_text(json.dumps(document), encoding="utf-8")
+    assert verify.ArchiveVerifier(tmp_path / "archive").run().valid
+
+
 def test_valid_record_snapshot(tmp_path: Path) -> None:
     """Indexed non-media snapshots participate in archive verification."""
     create_archive(tmp_path)
@@ -209,11 +219,12 @@ def test_invalid_sidecar_document(tmp_path: Path, payload: str) -> None:
     assert "sidecar" in report.issues[0].message
 
 
-def test_sidecar_and_hash_mismatches(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [True, 999])
+def test_sidecar_and_hash_mismatches(tmp_path: Path, version: int) -> None:
     """All sidecar identity and hash invariants are checked."""
     media_path, sidecar = create_archive(tmp_path, ".bin")
     document = json.loads(sidecar.read_text())
-    document["version"] = 999
+    document["version"] = version
     document["source"]["media_id"] = "wrong"
     document["hashes"]["source_sha256"] = "wrong"
     document["hashes"]["final_sha256"] = "wrong"

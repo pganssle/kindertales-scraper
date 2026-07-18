@@ -189,7 +189,12 @@ class ArchiveVerifier:
     ) -> tuple[VerificationIssue, ...]:
         media_id = str(row["id"])
         issues: list[VerificationIssue] = []
-        if document.get("version") != archive.SIDECAR_VERSION:
+        version = document.get("version")
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or not archive.MIN_SIDECAR_VERSION <= version <= archive.SIDECAR_VERSION
+        ):
             issues.append(VerificationIssue(media_id, "unsupported sidecar version"))
         source = document.get("source")
         if not isinstance(source, dict) or source.get("media_id") != media_id:

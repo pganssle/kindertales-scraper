@@ -15,6 +15,7 @@ import attrs
 from . import config, discovery, redaction
 
 SCHEMA_VERSION = 3
+MIN_SIDECAR_VERSION = 1
 SIDECAR_VERSION = 3
 RECORD_VERSION = 1
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
