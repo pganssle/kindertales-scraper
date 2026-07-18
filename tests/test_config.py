@@ -19,6 +19,7 @@ allow_plaintext_session_cache = true
 cache_directory = "private-cache"
 [archive]
 directory = "export"
+folder_format = "{child_name}"
 folder_frequency = "monthly"
 filename_format = "{child_name}_{timestamp:%Y%m%d}_{sequence:03d}{extension}"
 sidecar_layout = "parallel"
@@ -50,6 +51,7 @@ timezone = "America/New_York"
     assert loaded.archive_directory == Path("export")
     assert loaded.archive_layout == config.ArchiveLayout(
         folder_frequency=config.FolderFrequency.MONTHLY,
+        folder_format="{child_name}",
         filename_format=(
             "{child_name}_{timestamp:%Y%m%d}_{sequence:03d}{extension}"
         ),
@@ -122,6 +124,14 @@ timezone = "America/New_York"
         (
             "[account]\nemail='a@b'\n[archive]\nfilename_format='{timestamp'",
             "valid format string",
+        ),
+        (
+            "[account]\nemail='a@b'\n[archive]\nfolder_format='{unknown}'",
+            "folder_format has unknown fields",
+        ),
+        (
+            "[account]\nemail='a@b'\n[archive]\nfolder_format='{sequence:nope}'",
+            "folder_format has an invalid format specification",
         ),
     ],
 )

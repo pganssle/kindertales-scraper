@@ -61,10 +61,13 @@ def test_configurable_media_folders_and_names(
     """Calendar frequency and safe named fields determine the media path."""
     child, activity, medium = entities
     layout = config.ArchiveLayout(
-        frequency,
-        "{child_name}_{activity_type}_{original_stem}_{sequence:02d}{extension}",
+        folder_frequency=frequency,
+        folder_format="{child_name}",
+        filename_format=(
+            "{child_name}_{activity_type}_{original_stem}_{sequence:02d}{extension}"
+        ),
     )
-    expected = Path("media")
+    expected = Path("media/A-Lex")
     if folder:
         expected /= folder
     expected /= "A-Lex_Art-Play_photo_02.jpg"
@@ -78,7 +81,7 @@ def test_configurable_media_folders_and_names(
             layout,
             sequence=2,
             timestamp=captured,
-        ).parent == Path("media/2020-02")
+        ).parent == Path("media/A-Lex/2020-02")
 
 
 @pytest.mark.parametrize(
@@ -96,6 +99,10 @@ def test_configurable_media_folders_and_names(
             ),
             "sequence",
         ),
+        (
+            config.ArchiveLayout(folder_format="{child_name}/../elsewhere"),
+            "relative folder",
+        ),
     ],
 )
 def test_invalid_rendered_media_name(
@@ -106,7 +113,7 @@ def test_invalid_rendered_media_name(
 ) -> None:
     """Templates cannot escape the archive or hide every collision number."""
     child, activity, medium = entities
-    if "safe" in message:
+    if message != "sequence":
         with pytest.raises(archive.ArchiveError, match=message):
             archive.media_path(child, activity, medium, layout)
         return

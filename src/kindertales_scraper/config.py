@@ -45,6 +45,7 @@ class ArchiveLayout:
         default=FolderFrequency.NONE,
         converter=FolderFrequency,
     )
+    folder_format: str = ""
     filename_format: str = (
         "{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}"
     )
@@ -69,45 +70,53 @@ class ArchiveLayout:
                 "timestamp",
             }
         )
-        try:
-            fields = tuple(
-                field_name
-                for _, field_name, _, _ in string.Formatter().parse(
-                    self.filename_format
+        sample = {
+            field: (
+                dt.datetime(2000, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
+                if field == "timestamp"
+                else 1
+                if field == "sequence"
+                else ".jpg"
+                if field == "extension"
+                else "value"
+            )
+            for field in allowed
+        }
+
+        def validate(
+            setting: str,
+            template: str,
+            required: frozenset[str] = frozenset(),
+        ) -> None:
+            try:
+                fields = frozenset(
+                    field_name
+                    for _, field_name, _, _ in string.Formatter().parse(template)
+                    if field_name is not None
                 )
-                if field_name is not None
-            )
-        except ValueError as error:
-            msg = "archive.filename_format is not a valid format string"
-            raise ConfigError(msg) from error
-        field_set = frozenset(fields)
-        unknown = field_set - allowed
-        if unknown:
-            msg = f"archive.filename_format has unknown fields: {sorted(unknown)}"
-            raise ConfigError(msg)
-        required = frozenset({"extension", "sequence"})
-        missing = required - field_set
-        if missing:
-            msg = f"archive.filename_format is missing fields: {sorted(missing)}"
-            raise ConfigError(msg)
-        try:
-            self.filename_format.format_map(
-                {
-                    field: (
-                        dt.datetime(2000, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
-                        if field == "timestamp"
-                        else 1
-                        if field == "sequence"
-                        else ".jpg"
-                        if field == "extension"
-                        else "value"
-                    )
-                    for field in allowed
-                }
-            )
-        except (KeyError, ValueError) as error:
-            msg = "archive.filename_format has an invalid format specification"
-            raise ConfigError(msg) from error
+            except ValueError as error:
+                msg = f"archive.{setting} is not a valid format string"
+                raise ConfigError(msg) from error
+            unknown = fields - allowed
+            if unknown:
+                msg = f"archive.{setting} has unknown fields: {sorted(unknown)}"
+                raise ConfigError(msg)
+            missing = required - fields
+            if missing:
+                msg = f"archive.{setting} is missing fields: {sorted(missing)}"
+                raise ConfigError(msg)
+            try:
+                template.format_map(sample)
+            except (KeyError, ValueError) as error:
+                msg = f"archive.{setting} has an invalid format specification"
+                raise ConfigError(msg) from error
+
+        validate("folder_format", self.folder_format)
+        validate(
+            "filename_format",
+            self.filename_format,
+            frozenset({"extension", "sequence"}),
+        )
 
 
 @attrs.frozen
@@ -301,6 +310,7 @@ def load(path: Path) -> Config:
         archive_directory=Path(str(archive.get("directory", "archive"))),
         archive_layout=ArchiveLayout(
             folder_frequency=folder_frequency,
+            folder_format=str(archive.get("folder_format", "")),
             filename_format=str(
                 archive.get(
                     "filename_format",
@@ -331,6 +341,7 @@ def write_initial(path: Path, email: str) -> None:
         "[authentication]\nallow_plaintext_session_cache = false\n"
         'cache_directory = ".cache/kindertales-scraper"\n\n'
         '[archive]\ndirectory = "archive"\n'
+        'folder_format = ""\n'
         'folder_frequency = "none"\n'
         'filename_format = "{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}"\n'
         'sidecar_layout = "adjacent"\n'

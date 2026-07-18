@@ -79,13 +79,20 @@ def media_path(  # noqa: PLR0913 - path formatting requires the complete context
     if Path(name).name != name or safe_component(name) != name:
         msg = "archive.filename_format must produce one safe filename"
         raise ArchiveError(msg)
-    folder = {
+    formatted_folder = layout.folder_format.format_map(values)
+    folder = Path(formatted_folder) if formatted_folder else Path()
+    if folder.is_absolute() or any(
+        part in {".", ".."} or safe_component(part) != part for part in folder.parts
+    ):
+        msg = "archive.folder_format must produce a safe relative folder"
+        raise ArchiveError(msg)
+    calendar_folder = {
         config.FolderFrequency.NONE: (),
         config.FolderFrequency.DAILY: (effective_timestamp.strftime("%Y-%m-%d"),),
         config.FolderFrequency.MONTHLY: (effective_timestamp.strftime("%Y-%m"),),
         config.FolderFrequency.YEARLY: (effective_timestamp.strftime("%Y"),),
     }[layout.folder_frequency]
-    return Path("media", *folder, name)
+    return Path("media", folder, *calendar_folder, name)
 
 
 def sidecar_path(relative_media: Path, layout: config.ArchiveLayout) -> Path:
