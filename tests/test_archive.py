@@ -395,7 +395,12 @@ def test_store_media_and_sidecar(
                 child,
                 source,
                 source_hash,
-                {"EXIF:Make": "Camera"},
+                {
+                    "EXIF:Make": "Camera",
+                    "File:Directory": "/private/tmp",
+                    "File:FileName": "download.tmp",
+                    "SourceFile": "/private/tmp/download.tmp",
+                },
                 {"XMP:Description": "Caption"},
                 inferred_time=True,
                 inferred_gps=True,

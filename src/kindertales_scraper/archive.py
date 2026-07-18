@@ -15,7 +15,7 @@ import attrs
 from . import config, discovery, redaction
 
 SCHEMA_VERSION = 3
-SIDECAR_VERSION = 2
+SIDECAR_VERSION = 3
 RECORD_VERSION = 1
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -31,6 +31,28 @@ def sha256(path: Path) -> str:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+_HOST_METADATA_NAMES = frozenset(
+    {
+        "Directory",
+        "FileAccessDate",
+        "FileInodeChangeDate",
+        "FileModifyDate",
+        "FileName",
+        "FilePermissions",
+        "SourceFile",
+    }
+)
+
+
+def _portable_original_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove ExifTool values derived from the local temporary source path."""
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key.rsplit(":", 1)[-1] not in _HOST_METADATA_NAMES
+    }
 
 
 def safe_component(value: str) -> str:
@@ -493,7 +515,9 @@ class Archive:
                 "final_sha256": final_hash,
             },
             "metadata": {
-                "original_exiftool": dict(record.original_metadata),
+                "original_exiftool": _portable_original_metadata(
+                    record.original_metadata
+                ),
                 "embedded_fields": dict(record.embedded_fields),
                 "inferred_time": record.inferred_time,
                 "inferred_gps": record.inferred_gps,
