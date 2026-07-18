@@ -90,7 +90,9 @@ def test_sync_command(
     assert observed == [
         (sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2)), True, True)
     ]
-    assert capsys.readouterr().out == "2 children, 3 activities, 4 media (dry run)\n"
+    assert capsys.readouterr().out == (
+        "2 children, 3 activities, 4 media, 0 records (dry run)\n"
+    )
 
 
 @pytest.mark.parametrize(

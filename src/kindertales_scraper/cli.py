@@ -56,7 +56,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(  # noqa: T201 - this is the command-line presentation boundary.
             f"{summary.children} children, {summary.activities} activities, "
-            f"{summary.media} media" + (" (dry run)" if summary.dry_run else "")
+            f"{summary.media} media, {summary.records} records"
+            + (" (dry run)" if summary.dry_run else "")
         )
     elif arguments.command == "verify":
         settings = config.load(arguments.config)

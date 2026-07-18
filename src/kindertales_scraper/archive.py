@@ -14,7 +14,7 @@ import attrs
 
 from . import config, discovery, redaction
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SIDECAR_VERSION = 2
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -180,7 +180,7 @@ class Archive:
 
     def _initialize(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, SCHEMA_VERSION}:
             msg = f"unsupported archive schema version: {version}"
             raise ArchiveError(msg)
         self.connection.executescript(
@@ -207,6 +207,13 @@ class Archive:
                 media_id TEXT NOT NULL REFERENCES media(id),
                 PRIMARY KEY (activity_id, media_id)
             );
+            CREATE TABLE IF NOT EXISTS records (
+                id TEXT PRIMARY KEY, category TEXT NOT NULL,
+                child_id TEXT REFERENCES children(id),
+                relative_path TEXT NOT NULL UNIQUE, source_url TEXT NOT NULL,
+                observed_at TEXT NOT NULL, title TEXT, details_json TEXT NOT NULL,
+                available INTEGER NOT NULL DEFAULT 1
+            );
             CREATE TABLE IF NOT EXISTS sync_runs (
                 id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
                 status TEXT NOT NULL, cursors_json TEXT NOT NULL
@@ -220,6 +227,62 @@ class Archive:
             )
         self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.connection.commit()
+
+    def store_record(
+        self,
+        record: discovery.Record,
+        child: discovery.Child | None = None,
+    ) -> Path:
+        """Atomically store a structured non-media record and JSON snapshot."""
+        if child is not None and child.id != record.child_id:
+            msg = "record child does not match its archive context"
+            raise ArchiveError(msg)
+        owner = safe_component(child.name) if child is not None else "_account"
+        relative = Path("records", owner, f"{safe_component(record.category)}.json")
+        destination = self.root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(".json.tmp")
+        document = {
+            "version": 1,
+            "id": record.id,
+            "category": record.category,
+            "child_id": record.child_id,
+            "title": record.title,
+            "observed_at": record.observed_at.isoformat(),
+            "source_url": redaction.url(record.source_url),
+            "details": dict(record.details),
+        }
+        temporary.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            with self.connection:
+                self.connection.execute(
+                    """INSERT INTO records
+                    (id, category, child_id, relative_path, source_url, observed_at,
+                    title, details_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET category=excluded.category,
+                    child_id=excluded.child_id, relative_path=excluded.relative_path,
+                    source_url=excluded.source_url,
+                    observed_at=excluded.observed_at, title=excluded.title,
+                    details_json=excluded.details_json, available=1""",
+                    (
+                        record.id,
+                        record.category,
+                        record.child_id,
+                        relative.as_posix(),
+                        redaction.url(record.source_url),
+                        record.observed_at.isoformat(),
+                        record.title,
+                        json.dumps(record.details, sort_keys=True),
+                    ),
+                )
+                temporary.replace(destination)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        return destination
 
     def upsert_child(self, child: discovery.Child) -> None:
         """Insert or update an available child."""
@@ -472,7 +535,7 @@ class Archive:
 
     def mark_unavailable(self, table: str, present_ids: Sequence[str]) -> None:
         """Mark remotely missing records unavailable without deleting files."""
-        if table not in {"children", "activities", "media"}:
+        if table not in {"children", "activities", "media", "records"}:
             msg = f"cannot mark records in table {table}"
             raise ArchiveError(msg)
         placeholders = ",".join("?" for _ in present_ids)
@@ -484,6 +547,7 @@ class Archive:
                 "children": "UPDATE children SET available=0",
                 "activities": "UPDATE activities SET available=0",
                 "media": "UPDATE media SET available=0",
+                "records": "UPDATE records SET available=0",
             }
             self.connection.execute(statements[table])
         self.connection.commit()

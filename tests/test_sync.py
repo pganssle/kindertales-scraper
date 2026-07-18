@@ -6,6 +6,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import attrs
 import httpx
 import pytest
 
@@ -36,7 +37,7 @@ class FakeAdapter:
         activities: tuple[discovery.Activity, ...],
         error: Exception | None = None,
     ) -> None:
-        self.child_records = children
+        self.children_records = children
         self.activity_records = activities
         self.error = error
         self.bounds: list[tuple[dt.date | None, dt.date | None]] = []
@@ -44,7 +45,7 @@ class FakeAdapter:
     async def children(self) -> tuple[discovery.Child, ...]:
         if self.error is not None:
             raise self.error
-        return self.child_records
+        return self.children_records
 
     async def activities(
         self,
@@ -60,6 +61,32 @@ class FakeAdapter:
             if activity.child_id == child_id:
                 yield activity
 
+
+class FakeRecordAdapter(FakeAdapter):
+    """Expose synthetic child, message, and billing record snapshots."""
+
+    def __init__(
+        self,
+        children: tuple[discovery.Child, ...],
+        activities: tuple[discovery.Activity, ...],
+    ) -> None:
+        super().__init__(children, activities)
+
+    async def child_records(
+        self, child_id: str
+    ) -> tuple[discovery.Record, ...]:
+        return (self._record("profile", child_id),)
+
+    @staticmethod
+    def _record(category: str, child_id: str | None = None) -> discovery.Record:
+        return discovery.Record(
+            f"record-{category}-{child_id or 'account'}",
+            category,
+            f"https://example.test/?pg={category}&token=secret",
+            dt.datetime(2026, 7, 18, tzinfo=dt.UTC),
+            {"text": ["Synthetic"]},
+            child_id,
+        )
 
 class FakeEnricher:
     """Enrich media deterministically without an ExifTool installation."""
@@ -130,6 +157,67 @@ def settings(tmp_path: Path) -> config.Config:
             max_retries=0,
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_archives_enabled_child_records(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """Configured child snapshots join the same sync run."""
+    child, _activities = records
+    configuration = attrs.evolve(
+        settings(tmp_path),
+        exports=config.Exports(child_records=True),
+    )
+    adapter = FakeRecordAdapter((child,), ())
+    transport = httpx.MockTransport(lambda _request: httpx.Response(500))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with archive.Archive(configuration.archive_directory) as store:
+            runner = sync.SyncEngine(
+                configuration,
+                adapter,
+                client,
+                store,
+                scheduler.Requester(
+                    configuration.request_policy, ImmediateLimiter()
+                ),
+                FakeEnricher(),
+            )
+            summary = await runner.run(dry_run=False)
+            rows = store.connection.execute("SELECT * FROM records").fetchall()
+    assert summary.records == 1
+    assert len(rows) == 1
+    assert all("REDACTED" in row["source_url"] for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_record_discovery_respects_disabled_exports(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """An adapter isn't asked for record areas when every export is disabled."""
+    child, _activities = records
+    adapter = FakeRecordAdapter((child,), ())
+    configuration = attrs.evolve(
+        settings(tmp_path),
+        exports=config.Exports(child_records=False),
+    )
+    transport = httpx.MockTransport(lambda _request: httpx.Response(500))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with archive.Archive(configuration.archive_directory) as store:
+            runner = sync.SyncEngine(
+                configuration,
+                adapter,
+                client,
+                store,
+                scheduler.Requester(
+                    configuration.request_policy, ImmediateLimiter()
+                ),
+                FakeEnricher(),
+            )
+            summary = await runner.run(dry_run=True)
+    assert summary.records == 0
 
 
 async def engine(

@@ -5,7 +5,7 @@ import hashlib
 import tempfile
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 
 import attrs
 import httpx
@@ -44,6 +44,17 @@ class Adapter(Protocol):
         """Iterate bounded activity history."""
         ...
 
+
+@runtime_checkable
+class RecordAdapter(Protocol):
+    """Optional non-media record discovery supported by the legacy adapter."""
+
+    async def child_records(
+        self,
+        child_id: str,
+    ) -> tuple[discovery.Record, ...]:
+        """Return record-area snapshots for one child."""
+        ...
 
 class Enricher(Protocol):
     """Metadata enrichment operation required by synchronization."""
@@ -85,6 +96,7 @@ class SyncSummary:
     activities: int
     media: int
     dry_run: bool
+    records: int = 0
 
 
 @attrs.define
@@ -114,6 +126,7 @@ class SyncEngine:
             children = await self.adapter.children()
             self.reporter.start(progress.Stage.DISCOVERY, len(children))
             activities: list[tuple[discovery.Child, discovery.Activity]] = []
+            records: list[tuple[discovery.Child | None, discovery.Record]] = []
             for child in children:
                 effective_from = self._effective_from(
                     bounds.from_date, cursors.get(child.id)
@@ -130,6 +143,7 @@ class SyncEngine:
                     ]
                 )
                 self.reporter.advance(progress.Stage.DISCOVERY)
+            records = await self._discover_records(children)
             media_count = len(
                 {medium.id for _, item in activities for medium in item.media}
             )
@@ -139,14 +153,21 @@ class SyncEngine:
                     len(activities),
                     media_count,
                     dry_run=True,
+                    records=len(records),
                 )
             for child in children:
                 self.store.upsert_child(child)
+            for record_child, record in records:
+                self.store.store_record(record, record_child)
             await self._archive_activities(activities)
             cursor_updates = self._cursor_updates(activities, cursors)
             self.store.mark_unavailable(
                 "children", tuple(child.id for child in children)
             )
+            if records:
+                self.store.mark_unavailable(
+                    "records", tuple(record.id for _, record in records)
+                )
             if not cursors and bounds.from_date is None and bounds.through_date is None:
                 self.store.mark_unavailable(
                     "activities",
@@ -166,6 +187,7 @@ class SyncEngine:
                 len(activities),
                 media_count,
                 dry_run=False,
+                records=len(records),
             )
         except Exception:
             if run_id is not None:
@@ -173,6 +195,21 @@ class SyncEngine:
             raise
         finally:
             self.reporter.close()
+
+    async def _discover_records(
+        self,
+        children: Sequence[discovery.Child],
+    ) -> list[tuple[discovery.Child | None, discovery.Record]]:
+        if not isinstance(self.adapter, RecordAdapter):
+            return []
+        records: list[tuple[discovery.Child | None, discovery.Record]] = []
+        if self.settings.exports.child_records:
+            for child in children:
+                records.extend(
+                    (child, record)
+                    for record in await self.adapter.child_records(child.id)
+                )
+        return records
 
     def _effective_from(
         self, requested: dt.date | None, cursor: str | None

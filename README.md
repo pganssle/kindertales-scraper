@@ -11,8 +11,12 @@ authorization from Kindertales before using this program. Authorization should
 cover the family account, its linked children, session reuse, and the configured
 request rate. See the [Kindertales Terms of Service](https://www.kindertales.com/terms-of-service/).
 
-The scraper does not yet cover billing, forms, standalone documents, general
-messages, or attendance.
+The scraper also snapshots the server-rendered baby bulletin, attendance,
+enrollment, immunization, medication, milestone, and profile/document pages for
+each child. These snapshots retain visible text and non-secret field values;
+they don't yet download linked standalone documents.
+
+Messages and billing aren't exported yet.
 
 ## Installation
 
@@ -90,6 +94,8 @@ the destination, backups, and full-disk encryption is the operator's
 responsibility. Logs and errors redact authorization headers, cookies, bearer
 tokens, and all signed URL query values. Never commit `config.toml`, browser
 state, live responses, or archive data.
+
+`[exports].child_records` controls the child snapshots and defaults to `true`.
 
 ## Development
 

@@ -150,6 +150,60 @@ def test_dom_fallback() -> None:
     )
 
 
+def test_parse_structured_record_page() -> None:
+    """Record snapshots retain visible values while excluding executable secrets."""
+    document = """
+    <title>Child Profile</title><h1>Ignored second title</h1>
+    <script><span>script text</span></script>
+    <style>style text</style><svg><path>svg text</path></svg>
+    <p>  Medical notes  </p>
+    <input name="note" value="synthetic">
+    <input name="consent" type="checkbox" checked>
+    <input name="declined" type="radio">
+    <input name="csrf_token" value="secret">
+    <input name="password" type="password" value="secret">
+    <input name="save" type="submit" value="Save">
+    <input value="unnamed"><textarea name="empty"></textarea>
+    """
+    observed = dt.datetime(2026, 7, 18, 12, tzinfo=dt.UTC)
+    record = discovery.parse_record_page(
+        document,
+        category="profile",
+        source_url="https://example.test/?pg=profile&token=secret",
+        observed_at=observed,
+        child_id="child-1",
+    )
+    assert record.title == "Child Profile"
+    assert record.details["text"] == (
+        "Child Profile",
+        "Ignored second title",
+        "Medical notes",
+    )
+    assert record.details["fields"] == {
+        "note": "synthetic",
+        "consent": True,
+        "declined": False,
+    }
+    assert record.id == discovery.parse_record_page(
+        document,
+        category="profile",
+        source_url=record.source_url,
+        observed_at=observed + dt.timedelta(days=1),
+        child_id="child-1",
+    ).id
+
+
+def test_record_page_requires_aware_observation_time() -> None:
+    """Record provenance cannot silently use an ambiguous local timestamp."""
+    with pytest.raises(discovery.DiscoveryError, match="timezone"):
+        discovery.parse_record_page(
+            "<p>No title</p>",
+            category="profile",
+            source_url="https://example.test/",
+            observed_at=dt.datetime(2026, 7, 18, tzinfo=dt.UTC).replace(tzinfo=None),
+        )
+
+
 @pytest.mark.asyncio
 async def test_adapter_paginates() -> None:
     """The adapter traverses pages and passes continuation cursors."""
@@ -391,6 +445,35 @@ async def test_legacy_adapter_traverses_inclusive_dates() -> None:
     assert requests[1].url.params["activitydate"] == "07/14/2026"
     assert requests[2].url.params["activitydate"] == "07/15/2026"
     assert limiter.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_legacy_adapter_snapshots_child_record_routes() -> None:
+    """Every documented child report area is requested read-only."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, text="<title>Synthetic</title>")
+
+    async with httpx.AsyncClient(
+        base_url="https://example.test", transport=httpx.MockTransport(handler)
+    ) as client:
+        records = await discovery.LegacyKindertalesAdapter(client).child_records(
+            "child-1"
+        )
+    assert [record.category for record in records] == [
+        "baby_bulletin",
+        "attendance",
+        "enrollment",
+        "immunizations",
+        "medications",
+        "milestones",
+        "profile_documents",
+    ]
+    assert all(request.url.params["cid"] == "child-1" for request in requests)
+    assert requests[0].url.params["subpg"] == "child"
+    assert "subpg" not in requests[1].url.params
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,19 @@ class ActivityPage:
     next_cursor: str | None = None
 
 
+@attrs.frozen
+class Record:
+    """A read-only snapshot of a non-media Kindertales record area."""
+
+    id: str
+    category: str
+    source_url: str
+    observed_at: dt.datetime
+    details: Mapping[str, Any]
+    child_id: str | None = None
+    title: str | None = None
+
+
 def _required_string(item: Mapping[str, Any], key: str) -> str:
     value = item.get(key)
     if not isinstance(value, str) or not value:
@@ -200,6 +213,91 @@ def parse_children_html(document: str) -> tuple[Child, ...]:
     parser = _ChildHTMLParser()
     parser.feed(document)
     return tuple(parser.children)
+
+
+_SECRET_FIELD_PARTS = frozenset(
+    {"authorization", "csrf", "password", "secret", "session", "token"}
+)
+
+
+class _RecordHTMLParser(html.parser.HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.text: list[str] = []
+        self.fields: dict[str, str | bool] = {}
+        self.title: list[str] = []
+        self._ignored_depth = 0
+        self._title_depth = 0
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs_list: list[tuple[str, str | None]],
+    ) -> None:
+        if tag in {"script", "style", "svg"}:
+            self._ignored_depth += 1
+            return
+        if self._ignored_depth:
+            return
+        attributes = dict(attrs_list)
+        if tag in {"title", "h1"} and not self.title:
+            self._title_depth += 1
+        if tag not in {"input", "select", "textarea"}:
+            return
+        name = attributes.get("name")
+        field_type = (attributes.get("type") or "").casefold()
+        if (
+            not name
+            or field_type in {"hidden", "password", "submit"}
+            or any(part in name.casefold() for part in _SECRET_FIELD_PARTS)
+        ):
+            return
+        if field_type in {"checkbox", "radio"}:
+            self.fields[name] = "checked" in attributes
+        elif (value := attributes.get("value")) is not None:
+            self.fields[name] = value
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
+        value = " ".join(data.split())
+        if not value:
+            return
+        self.text.append(value)
+        if self._title_depth:
+            self.title.append(value)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "svg"} and self._ignored_depth:
+            self._ignored_depth -= 1
+        elif tag in {"title", "h1"} and self._title_depth:
+            self._title_depth -= 1
+
+
+def parse_record_page(
+    document: str,
+    *,
+    category: str,
+    source_url: str,
+    observed_at: dt.datetime,
+    child_id: str | None = None,
+) -> Record:
+    """Convert one server-rendered account page into a structured snapshot."""
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        msg = "record observed_at must include a timezone offset"
+        raise DiscoveryError(msg)
+    parser = _RecordHTMLParser()
+    parser.feed(document)
+    title = " ".join(parser.title) or None
+    return Record(
+        _stable_id(category, child_id or "", source_url),
+        category,
+        source_url,
+        observed_at,
+        {"text": tuple(parser.text), "fields": parser.fields},
+        child_id,
+        title,
+    )
 
 
 def _classes(attributes: Mapping[str, str | None]) -> frozenset[str]:
@@ -484,6 +582,34 @@ class LegacyKindertalesAdapter:
                 yield activity
             current += dt.timedelta(days=1)
 
+    async def child_records(self, child_id: str) -> tuple[Record, ...]:
+        """Snapshot the read-only report and profile areas for one child."""
+        routes = (
+            ("baby_bulletin", "babybulletin", "child"),
+            ("attendance", "attendanceprofile", None),
+            ("enrollment", "enrollment", "child"),
+            ("immunizations", "immunization", None),
+            ("medications", "medications", "main"),
+            ("milestones", "milestonereport", None),
+            ("profile_documents", "profiledetails", None),
+        )
+        records = []
+        for category, page, subpage in routes:
+            params = {"pg": page, "cid": child_id}
+            if subpage is not None:
+                params["subpg"] = subpage
+            response = await self.get("/index.php", params=params)
+            response.raise_for_status()
+            records.append(
+                parse_record_page(
+                    response.text,
+                    category=category,
+                    source_url=str(response.url),
+                    observed_at=dt.datetime.now(dt.UTC),
+                    child_id=child_id,
+                )
+            )
+        return tuple(records)
 
 @attrs.frozen
 class KindertalesAdapter:

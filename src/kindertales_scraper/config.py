@@ -194,6 +194,13 @@ class Center:
 
 
 @attrs.frozen
+class Exports:
+    """Optional non-media account areas included in synchronization."""
+
+    child_records: bool = True
+
+
+@attrs.frozen
 class Config:
     """Complete application configuration."""
 
@@ -206,6 +213,7 @@ class Config:
     request_policy: RequestPolicy = RequestPolicy()
     centers: Mapping[str, Center] = attrs.field(factory=dict)
     fallback_coordinates: Coordinates | None = None
+    exports: Exports = Exports()
 
     def __attrs_post_init__(self) -> None:
         """Validate account and synchronization settings."""
@@ -246,6 +254,7 @@ def load(path: Path) -> Config:
     synchronization = _table(data, "synchronization")
     policy_data = _table(data, "request_policy")
     metadata = _table(data, "metadata")
+    exports = _table(data, "exports")
 
     raw_quotas = policy_data.get(
         "quotas",
@@ -330,6 +339,9 @@ def load(path: Path) -> Config:
         ),
         centers=centers,
         fallback_coordinates=_coordinates(metadata, "fallback_"),
+        exports=Exports(
+            child_records=bool(exports.get("child_records", True)),
+        ),
     )
 
 
@@ -345,6 +357,7 @@ def write_initial(path: Path, email: str) -> None:
         'folder_frequency = "none"\n'
         'filename_format = "{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}"\n'
         'sidecar_layout = "adjacent"\n'
+        "\n[exports]\nchild_records = true\n"
     )
     path.write_text(content, encoding="utf-8")
     path.chmod(0o600)

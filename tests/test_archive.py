@@ -5,6 +5,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+import attrs
 import pytest
 
 from kindertales_scraper import archive, config, discovery
@@ -301,6 +302,61 @@ def test_migrates_version_one_archive(tmp_path: Path) -> None:
             for row in store.connection.execute("PRAGMA table_info(activities)")
         }
     assert "details_json" in columns
+
+
+def test_store_structured_child_and_account_records(tmp_path: Path) -> None:
+    """Non-media records have redacted, deterministic JSON snapshots and rows."""
+    child = discovery.Child("child-1", "A Child")
+    observed = dt.datetime(2026, 7, 18, 12, tzinfo=dt.UTC)
+    child_record = discovery.Record(
+        "record-1",
+        "health/profile",
+        "https://example.test/?token=secret",
+        observed,
+        {"text": ["Synthetic"]},
+        child.id,
+        "Profile",
+    )
+    account_record = discovery.Record(
+        "record-2",
+        "billing",
+        "https://example.test/?signature=secret",
+        observed,
+        {"balance": "synthetic"},
+    )
+    with archive.Archive(tmp_path) as store:
+        store.upsert_child(child)
+        child_path = store.store_record(child_record, child)
+        account_path = store.store_record(account_record)
+        store.store_record(child_record, child)
+        rows = store.connection.execute("SELECT * FROM records ORDER BY id").fetchall()
+    assert child_path == tmp_path / "records/A-Child/health-profile.json"
+    assert account_path == tmp_path / "records/_account/billing.json"
+    document = json.loads(child_path.read_text(encoding="utf-8"))
+    assert document["source_url"].endswith("token=REDACTED")
+    assert json.loads(rows[0]["details_json"]) == {"text": ["Synthetic"]}
+    assert rows[1]["source_url"].endswith("signature=REDACTED")
+
+
+def test_store_record_rejects_wrong_child_and_cleans_conflict(tmp_path: Path) -> None:
+    """Record context mismatches and path collisions cannot leave temporary JSON."""
+    child = discovery.Child("child-1", "Child")
+    other = discovery.Child("child-2", "Child")
+    record = discovery.Record(
+        "first", "profile", "https://example.test", dt.datetime.now(dt.UTC), {}
+    )
+    with archive.Archive(tmp_path) as store:
+        with pytest.raises(archive.ArchiveError, match="does not match"):
+            store.store_record(record, child)
+        store.upsert_child(child)
+        store.upsert_child(other)
+        store.store_record(attrs.evolve(record, child_id=child.id), child)
+        with pytest.raises(sqlite3.IntegrityError):
+            store.store_record(
+                attrs.evolve(record, id="second", child_id=other.id),
+                other,
+            )
+    assert not tuple(tmp_path.rglob("*.tmp"))
 
 
 def test_reject_newer_schema(tmp_path: Path) -> None:
