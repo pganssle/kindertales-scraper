@@ -43,6 +43,16 @@ and 2 media downloads. Only increase them when the written authorization allows
 it. Center coordinates and timezones are keyed by Kindertales center ID; the
 optional global coordinates are used only after a center-specific value.
 
+Archive names default to
+`{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}`. The timestamp prefers
+authentic capture metadata and falls back to the activity time; `sequence` is
+the one-based collision number. Set `folder_frequency` to `none`, `daily`,
+`monthly`, or `yearly`. Set `sidecar_layout = "parallel"` to mirror the media
+tree under a sibling `sidecars` directory instead of placing JSON beside each
+media file. Filename templates may use `timestamp`, `sequence`, `extension`,
+`child_name`, `child_id`, `activity_type`, `activity_id`, `media_id`,
+`original_name`, and `original_stem`.
+
 ## Commands
 
 ```console

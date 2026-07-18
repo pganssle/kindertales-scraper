@@ -19,6 +19,9 @@ allow_plaintext_session_cache = true
 cache_directory = "private-cache"
 [archive]
 directory = "export"
+folder_frequency = "monthly"
+filename_format = "{child_name}_{timestamp:%Y%m%d}_{sequence:03d}{extension}"
+sidecar_layout = "parallel"
 [synchronization]
 overlap_days = 4
 [request_policy]
@@ -45,6 +48,13 @@ timezone = "America/New_York"
     assert loaded.cache_directory == Path("private-cache")
     assert loaded.allow_plaintext_session_cache
     assert loaded.archive_directory == Path("export")
+    assert loaded.archive_layout == config.ArchiveLayout(
+        folder_frequency=config.FolderFrequency.MONTHLY,
+        filename_format=(
+            "{child_name}_{timestamp:%Y%m%d}_{sequence:03d}{extension}"
+        ),
+        sidecar_layout=config.SidecarLayout.PARALLEL,
+    )
     assert loaded.overlap_days == 4
     assert loaded.request_policy == config.RequestPolicy(
         quotas=(config.Quota(5, 2.0),),
@@ -89,6 +99,30 @@ timezone = "America/New_York"
         ),
         ("[account]\nemail='a@b'\n[metadata]\ncenters=[]", "centers must be a table"),
         ("[account]\nemail='a@b'\n[metadata.centers]\nx=2", "each center"),
+        (
+            "[account]\nemail='a@b'\n[archive]\nfolder_frequency='weekly'",
+            "folder_frequency",
+        ),
+        (
+            "[account]\nemail='a@b'\n[archive]\nsidecar_layout='elsewhere'",
+            "sidecar_layout",
+        ),
+        (
+            "[account]\nemail='a@b'\n[archive]\nfilename_format='{unknown}_{sequence}{extension}'",
+            "unknown fields",
+        ),
+        (
+            "[account]\nemail='a@b'\n[archive]\nfilename_format='{timestamp}{extension}'",
+            "missing fields",
+        ),
+        (
+            "[account]\nemail='a@b'\n[archive]\nfilename_format='{timestamp}_{sequence:nope}{extension}'",
+            "format specification",
+        ),
+        (
+            "[account]\nemail='a@b'\n[archive]\nfilename_format='{timestamp'",
+            "valid format string",
+        ),
     ],
 )
 def test_invalid_configuration(tmp_path: Path, content: str, message: str) -> None:

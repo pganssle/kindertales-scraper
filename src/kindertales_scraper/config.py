@@ -1,6 +1,9 @@
 """Typed configuration for kindertales-scraper."""
 
+import datetime as dt
+import enum
 import math
+import string
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -16,6 +19,95 @@ _MAX_LONGITUDE = 180
 
 class ConfigError(ValueError):
     """Raised when a configuration file is invalid."""
+
+
+class FolderFrequency(enum.StrEnum):
+    """Calendar grouping applied below the archive media directory."""
+
+    NONE = "none"
+    DAILY = "daily"
+    MONTHLY = "monthly"
+    YEARLY = "yearly"
+
+
+class SidecarLayout(enum.StrEnum):
+    """Location of JSON sidecars relative to archived media."""
+
+    ADJACENT = "adjacent"
+    PARALLEL = "parallel"
+
+
+@attrs.frozen
+class ArchiveLayout:
+    """Naming and folder layout for archived media and sidecars."""
+
+    folder_frequency: FolderFrequency = attrs.field(
+        default=FolderFrequency.NONE,
+        converter=FolderFrequency,
+    )
+    filename_format: str = (
+        "{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}"
+    )
+    sidecar_layout: SidecarLayout = attrs.field(
+        default=SidecarLayout.ADJACENT,
+        converter=SidecarLayout,
+    )
+
+    def __attrs_post_init__(self) -> None:
+        """Validate the restricted Python-style filename template."""
+        allowed = frozenset(
+            {
+                "activity_id",
+                "activity_type",
+                "child_id",
+                "child_name",
+                "extension",
+                "media_id",
+                "original_name",
+                "original_stem",
+                "sequence",
+                "timestamp",
+            }
+        )
+        try:
+            fields = tuple(
+                field_name
+                for _, field_name, _, _ in string.Formatter().parse(
+                    self.filename_format
+                )
+                if field_name is not None
+            )
+        except ValueError as error:
+            msg = "archive.filename_format is not a valid format string"
+            raise ConfigError(msg) from error
+        field_set = frozenset(fields)
+        unknown = field_set - allowed
+        if unknown:
+            msg = f"archive.filename_format has unknown fields: {sorted(unknown)}"
+            raise ConfigError(msg)
+        required = frozenset({"extension", "sequence"})
+        missing = required - field_set
+        if missing:
+            msg = f"archive.filename_format is missing fields: {sorted(missing)}"
+            raise ConfigError(msg)
+        try:
+            self.filename_format.format_map(
+                {
+                    field: (
+                        dt.datetime(2000, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
+                        if field == "timestamp"
+                        else 1
+                        if field == "sequence"
+                        else ".jpg"
+                        if field == "extension"
+                        else "value"
+                    )
+                    for field in allowed
+                }
+            )
+        except (KeyError, ValueError) as error:
+            msg = "archive.filename_format has an invalid format specification"
+            raise ConfigError(msg) from error
 
 
 @attrs.frozen
@@ -100,6 +192,7 @@ class Config:
     cache_directory: Path = Path(".cache/kindertales-scraper")
     allow_plaintext_session_cache: bool = False
     archive_directory: Path = Path("archive")
+    archive_layout: ArchiveLayout = ArchiveLayout()
     overlap_days: int = 7
     request_policy: RequestPolicy = RequestPolicy()
     centers: Mapping[str, Center] = attrs.field(factory=dict)
@@ -183,6 +276,20 @@ def load(path: Path) -> Config:
     if not isinstance(email, str):
         msg = "account.email is required"
         raise ConfigError(msg)
+    try:
+        folder_frequency = FolderFrequency(
+            str(archive.get("folder_frequency", FolderFrequency.NONE))
+        )
+    except ValueError as error:
+        msg = "archive.folder_frequency must be none, daily, monthly, or yearly"
+        raise ConfigError(msg) from error
+    try:
+        sidecar_layout = SidecarLayout(
+            str(archive.get("sidecar_layout", SidecarLayout.ADJACENT))
+        )
+    except ValueError as error:
+        msg = "archive.sidecar_layout must be adjacent or parallel"
+        raise ConfigError(msg) from error
     return Config(
         email=email,
         cache_directory=Path(
@@ -192,6 +299,16 @@ def load(path: Path) -> Config:
             authentication.get("allow_plaintext_session_cache", False)
         ),
         archive_directory=Path(str(archive.get("directory", "archive"))),
+        archive_layout=ArchiveLayout(
+            folder_frequency=folder_frequency,
+            filename_format=str(
+                archive.get(
+                    "filename_format",
+                    "{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}",
+                )
+            ),
+            sidecar_layout=sidecar_layout,
+        ),
         overlap_days=int(synchronization.get("overlap_days", 7)),
         request_policy=RequestPolicy(
             quotas=quotas,
@@ -214,6 +331,9 @@ def write_initial(path: Path, email: str) -> None:
         "[authentication]\nallow_plaintext_session_cache = false\n"
         'cache_directory = ".cache/kindertales-scraper"\n\n'
         '[archive]\ndirectory = "archive"\n'
+        'folder_frequency = "none"\n'
+        'filename_format = "{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}"\n'
+        'sidecar_layout = "adjacent"\n'
     )
     path.write_text(content, encoding="utf-8")
     path.chmod(0o600)

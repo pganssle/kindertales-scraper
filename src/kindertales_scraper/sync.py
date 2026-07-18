@@ -403,7 +403,10 @@ async def run_configured(  # pragma: no cover - exercised by the authorized smok
     ) as client:
         limiter = scheduler.RollingLimiter(settings.request_policy)
         requester = scheduler.Requester(settings.request_policy, limiter)
-        with archive.Archive(settings.archive_directory) as store:
+        with archive.Archive(
+            settings.archive_directory,
+            settings.archive_layout,
+        ) as store:
             engine = SyncEngine(
                 settings,
                 discovery.LegacyKindertalesAdapter(client, requester=requester),

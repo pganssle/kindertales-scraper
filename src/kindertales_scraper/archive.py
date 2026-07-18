@@ -12,7 +12,7 @@ from typing import Any, Self
 
 import attrs
 
-from . import discovery, redaction
+from . import config, discovery, redaction
 
 SCHEMA_VERSION = 1
 SIDECAR_VERSION = 1
@@ -42,25 +42,87 @@ def safe_component(value: str) -> str:
     return component[:100]
 
 
-def media_path(
+def media_path(  # noqa: PLR0913 - path formatting requires the complete context
     child: discovery.Child,
     activity: discovery.Activity,
     medium: discovery.MediaReference,
+    layout: config.ArchiveLayout | None = None,
+    *,
+    sequence: int = 1,
+    timestamp: dt.datetime | None = None,
 ) -> Path:
-    """Return a deterministic archive-relative media path."""
+    """Return an archive-relative media path under the configured layout."""
+    if layout is None:
+        layout = config.ArchiveLayout()
+    if sequence < 1:
+        msg = "media filename sequence must be positive"
+        raise ArchiveError(msg)
     suffix = Path(medium.filename or "").suffix.lower()
     if not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
         suffix = ".bin"
-    child_part = safe_component(f"{child.name}-{child.id}")
-    activity_part = safe_component(f"{activity.kind}-{activity.id}")
-    name = f"{safe_component(medium.id)}{suffix}"
-    return Path(
-        "media",
-        child_part,
-        activity.occurred_at.date().isoformat(),
-        activity_part,
-        name,
-    )
+    original_name = Path(medium.filename or "").name
+    original_stem = Path(original_name).stem
+    effective_timestamp = timestamp or activity.occurred_at
+    values = {
+        "activity_id": safe_component(activity.id),
+        "activity_type": safe_component(activity.kind),
+        "child_id": safe_component(child.id),
+        "child_name": safe_component(child.name),
+        "extension": suffix,
+        "media_id": safe_component(medium.id),
+        "original_name": safe_component(original_name or medium.id),
+        "original_stem": safe_component(original_stem or medium.id),
+        "sequence": sequence,
+        "timestamp": effective_timestamp,
+    }
+    name = layout.filename_format.format_map(values)
+    if Path(name).name != name or safe_component(name) != name:
+        msg = "archive.filename_format must produce one safe filename"
+        raise ArchiveError(msg)
+    folder = {
+        config.FolderFrequency.NONE: (),
+        config.FolderFrequency.DAILY: (effective_timestamp.strftime("%Y-%m-%d"),),
+        config.FolderFrequency.MONTHLY: (effective_timestamp.strftime("%Y-%m"),),
+        config.FolderFrequency.YEARLY: (effective_timestamp.strftime("%Y"),),
+    }[layout.folder_frequency]
+    return Path("media", *folder, name)
+
+
+def sidecar_path(relative_media: Path, layout: config.ArchiveLayout) -> Path:
+    """Return the sidecar path for an archive-relative media path."""
+    if layout.sidecar_layout is config.SidecarLayout.PARALLEL:
+        relative_media = Path("sidecars", *relative_media.parts[1:])
+    return relative_media.with_suffix(relative_media.suffix + ".json")
+
+
+def capture_timestamp(
+    original_metadata: Mapping[str, Any],
+    fallback: dt.datetime,
+) -> dt.datetime:
+    """Return the best authentic capture timestamp, or the activity fallback."""
+    by_name = {
+        name.rsplit("]", 1)[-1].rsplit(":", 1)[-1]: value
+        for name, value in original_metadata.items()
+    }
+    for name in ("DateTimeOriginal", "CreateDate", "DateCreated"):
+        value = by_name.get(name)
+        if not isinstance(value, str):
+            continue
+        normalized = value
+        if (
+            len(normalized) >= len("0000:00:00 00:00:00")
+            and normalized[4] == ":"
+            and normalized[7] == ":"
+        ):
+            normalized = (
+                f"{normalized[:4]}-{normalized[5:7]}-{normalized[8:10]}"
+                f"T{normalized[11:]}"
+            )
+        try:
+            return dt.datetime.fromisoformat(normalized)
+        except ValueError:
+            continue
+    return fallback
 
 
 @attrs.frozen
@@ -82,9 +144,14 @@ class StoredMedia:
 class Archive:
     """Own the SQLite index and atomic archive filesystem updates."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        layout: config.ArchiveLayout | None = None,
+    ) -> None:
         """Open or create an archive rooted at *root*."""
         self.root = root
+        self.layout = layout or config.ArchiveLayout()
         self.root.mkdir(parents=True, exist_ok=True)
         self.database_path = root / "index.sqlite3"
         self.connection = sqlite3.connect(self.database_path)
@@ -175,10 +242,15 @@ class Archive:
 
     def store_media(self, record: StoredMedia) -> Path:
         """Atomically place enriched media, its sidecar, and its index record."""
-        relative = media_path(record.child, record.activity, record.medium)
+        previous = self.connection.execute(
+            "SELECT relative_path, sidecar_path FROM media WHERE id=?",
+            (record.medium.id,),
+        ).fetchone()
+        relative, sidecar_relative = self._allocate_paths(record)
         destination = self.root / relative
-        sidecar = destination.with_suffix(destination.suffix + ".json")
+        sidecar = self.root / sidecar_relative
         destination.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
         temporary_sidecar = sidecar.with_suffix(sidecar.suffix + ".tmp")
         final_hash = sha256(record.temporary_path)
         document = self._sidecar(record, relative, final_hash)
@@ -203,7 +275,7 @@ class Archive:
                     (
                         record.medium.id,
                         relative.as_posix(),
-                        sidecar.relative_to(self.root).as_posix(),
+                        sidecar_relative.as_posix(),
                         record.medium.content_type,
                         redaction.url(record.medium.url),
                         record.source_sha256,
@@ -221,7 +293,82 @@ class Archive:
         except Exception:
             temporary_sidecar.unlink(missing_ok=True)
             raise
+        if previous is not None:
+            self._remove_previous(
+                Path(str(previous["relative_path"])),
+                Path(str(previous["sidecar_path"])),
+                relative,
+                sidecar_relative,
+            )
         return destination
+
+    def _allocate_paths(self, record: StoredMedia) -> tuple[Path, Path]:
+        timestamp = capture_timestamp(
+            record.original_metadata,
+            record.activity.occurred_at,
+        )
+        previous_candidate: Path | None = None
+        sequence = 1
+        while True:
+            relative = media_path(
+                record.child,
+                record.activity,
+                record.medium,
+                self.layout,
+                sequence=sequence,
+                timestamp=timestamp,
+            )
+            if relative == previous_candidate:
+                msg = "archive.filename_format does not distinguish sequence values"
+                raise ArchiveError(msg)
+            sidecar_relative = sidecar_path(relative, self.layout)
+            media_owner = self.connection.execute(
+                "SELECT id FROM media WHERE relative_path=?",
+                (relative.as_posix(),),
+            ).fetchone()
+            sidecar_owner = self.connection.execute(
+                "SELECT id FROM media WHERE sidecar_path=?",
+                (sidecar_relative.as_posix(),),
+            ).fetchone()
+            owned_media = media_owner is None or media_owner["id"] == record.medium.id
+            owned_sidecar = (
+                sidecar_owner is None or sidecar_owner["id"] == record.medium.id
+            )
+            media_available = owned_media and (
+                not (self.root / relative).exists() or media_owner is not None
+            )
+            sidecar_available = owned_sidecar and (
+                not (self.root / sidecar_relative).exists()
+                or sidecar_owner is not None
+            )
+            if media_available and sidecar_available:
+                return relative, sidecar_relative
+            previous_candidate = relative
+            sequence += 1
+
+    def _remove_previous(
+        self,
+        previous_media: Path,
+        previous_sidecar: Path,
+        media: Path,
+        sidecar: Path,
+    ) -> None:
+        for previous, current in (
+            (previous_media, media),
+            (previous_sidecar, sidecar),
+        ):
+            if previous == current:
+                continue
+            path = self.root / previous
+            path.unlink(missing_ok=True)
+            parent = path.parent
+            layout_root = self.root / previous.parts[0]
+            while parent != layout_root:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
 
     def _sidecar(
         self,

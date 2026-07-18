@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kindertales_scraper import archive, discovery
+from kindertales_scraper import archive, config, discovery
 
 
 @pytest.fixture
@@ -39,11 +39,211 @@ def test_path_safety_and_fallback_extension(
     """Remote path data cannot escape the media root."""
     child, activity, medium = entities
     path = archive.media_path(child, activity, medium)
-    assert path == Path(
-        "media/A-Lex-child-1/2026-07-01/Art-Play-activity-1/media-1.jpg"
-    )
+    assert path == Path("media/20260701_093000_01.jpg")
     unsafe = discovery.MediaReference("x", "https://example.test", filename="x.bad!")
     assert archive.media_path(child, activity, unsafe).suffix == ".bin"
+
+
+@pytest.mark.parametrize(
+    ("frequency", "folder"),
+    [
+        (config.FolderFrequency.NONE, ""),
+        (config.FolderFrequency.DAILY, "2026-07-01"),
+        (config.FolderFrequency.MONTHLY, "2026-07"),
+        (config.FolderFrequency.YEARLY, "2026"),
+    ],
+)
+def test_configurable_media_folders_and_names(
+    entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+    frequency: config.FolderFrequency,
+    folder: str,
+) -> None:
+    """Calendar frequency and safe named fields determine the media path."""
+    child, activity, medium = entities
+    layout = config.ArchiveLayout(
+        frequency,
+        "{child_name}_{activity_type}_{original_stem}_{sequence:02d}{extension}",
+    )
+    expected = Path("media")
+    if folder:
+        expected /= folder
+    expected /= "A-Lex_Art-Play_photo_02.jpg"
+    assert archive.media_path(child, activity, medium, layout, sequence=2) == expected
+    if frequency is config.FolderFrequency.MONTHLY:
+        captured = dt.datetime(2020, 2, 3, 4, 5, 6, tzinfo=dt.UTC)
+        assert archive.media_path(
+            child,
+            activity,
+            medium,
+            layout,
+            sequence=2,
+            timestamp=captured,
+        ).parent == Path("media/2020-02")
+
+
+@pytest.mark.parametrize(
+    ("layout", "message"),
+    [
+        (
+            config.ArchiveLayout(
+                filename_format="../{sequence:02d}{extension}"
+            ),
+            "safe filename",
+        ),
+        (
+            config.ArchiveLayout(
+                filename_format="same_{sequence!s:.0}{extension}"
+            ),
+            "sequence",
+        ),
+    ],
+)
+def test_invalid_rendered_media_name(
+    tmp_path: Path,
+    entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+    layout: config.ArchiveLayout,
+    message: str,
+) -> None:
+    """Templates cannot escape the archive or hide every collision number."""
+    child, activity, medium = entities
+    if "safe" in message:
+        with pytest.raises(archive.ArchiveError, match=message):
+            archive.media_path(child, activity, medium, layout)
+        return
+    first = tmp_path / "first"
+    first.write_bytes(b"first")
+    second = tmp_path / "second"
+    second.write_bytes(b"second")
+    with archive.Archive(tmp_path / "archive", layout) as store:
+        store.upsert_child(child)
+        store.upsert_activity(activity)
+        store.store_media(
+            archive.StoredMedia(medium, activity, child, first, "source", {})
+        )
+        other = discovery.MediaReference(
+            "other",
+            medium.url,
+            medium.content_type,
+            medium.filename,
+        )
+        with pytest.raises(archive.ArchiveError, match=message):
+            store.store_media(
+                archive.StoredMedia(other, activity, child, second, "source", {})
+            )
+
+
+def test_capture_timestamp_and_collision_sequence(
+    tmp_path: Path,
+    entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+) -> None:
+    """Authentic capture time names media and equal names receive a sequence."""
+    child, activity, medium = entities
+    other = discovery.MediaReference(
+        "media-2",
+        "https://example.test/other.jpg",
+        "image/jpeg",
+        "other.jpg",
+    )
+    destinations = []
+    with archive.Archive(tmp_path / "archive") as store:
+        store.upsert_child(child)
+        store.upsert_activity(activity)
+        for index, selected in enumerate((medium, other), start=1):
+            source = tmp_path / f"source-{index}"
+            source.write_bytes(b"media")
+            destinations.append(
+                store.store_media(
+                    archive.StoredMedia(
+                        selected,
+                        activity,
+                        child,
+                        source,
+                        "source",
+                        {"EXIF:DateTimeOriginal": "2020:02:03 04:05:06"},
+                    )
+                )
+            )
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"replacement")
+        replaced = store.store_media(
+            archive.StoredMedia(
+                medium,
+                activity,
+                child,
+                replacement,
+                "source",
+                {"EXIF:DateTimeOriginal": "2020:02:03 04:05:06"},
+            )
+        )
+    assert [path.name for path in destinations] == (
+        ["20200203_040506_01.jpg", "20200203_040506_02.jpg"]
+    )
+    assert replaced == destinations[0]
+    assert replaced.read_bytes() == b"replacement"
+
+
+def test_parallel_sidecars_and_layout_migration(
+    tmp_path: Path,
+    entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+) -> None:
+    """A later sync moves indexed media and sidecars to the selected layout."""
+    child, activity, medium = entities
+    root = tmp_path / "archive"
+    daily = config.ArchiveLayout(config.FolderFrequency.DAILY)
+    first_source = tmp_path / "first"
+    first_source.write_bytes(b"first")
+    with archive.Archive(root, daily) as store:
+        store.upsert_child(child)
+        store.upsert_activity(activity)
+        old_media = store.store_media(
+            archive.StoredMedia(medium, activity, child, first_source, "source", {})
+        )
+        old_sidecar = old_media.with_suffix(old_media.suffix + ".json")
+
+    parallel = config.ArchiveLayout(
+        sidecar_layout=config.SidecarLayout.PARALLEL
+    )
+    second_source = tmp_path / "second"
+    second_source.write_bytes(b"second")
+    with archive.Archive(root, parallel) as store:
+        new_media = store.store_media(
+            archive.StoredMedia(medium, activity, child, second_source, "source", {})
+        )
+        row = store.connection.execute("SELECT * FROM media").fetchone()
+    new_sidecar = root / row["sidecar_path"]
+    assert new_media == root / "media/20260701_093000_01.jpg"
+    assert new_sidecar == root / "sidecars/20260701_093000_01.jpg.json"
+    assert new_media.read_bytes() == b"second"
+    assert new_sidecar.is_file()
+    assert not old_media.exists()
+    assert not old_sidecar.exists()
+
+
+@pytest.mark.parametrize(
+    ("metadata_values", "expected"),
+    [
+        ({"XMP:CreateDate": "2020-02-03T04:05:06-05:00"}, 2020),
+        ({"EXIF:DateTimeOriginal": "invalid"}, 2026),
+        ({"EXIF:DateTimeOriginal": ["2020:02:03 04:05:06"]}, 2026),
+    ],
+)
+def test_capture_timestamp_fallbacks(
+    entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+    metadata_values: dict[str, object],
+    expected: int,
+) -> None:
+    """ISO capture values are used while malformed and non-string values fall back."""
+    _, activity, _ = entities
+    timestamp = archive.capture_timestamp(metadata_values, activity.occurred_at)
+    assert timestamp.year == expected
+
+
+def test_media_path_rejects_nonpositive_sequence(
+    entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+) -> None:
+    """Collision sequences are one-based."""
+    with pytest.raises(archive.ArchiveError, match="positive"):
+        archive.media_path(*entities, sequence=0)
 
 
 @pytest.mark.parametrize("value", ["..", "///", "..."])

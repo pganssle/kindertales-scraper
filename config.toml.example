@@ -7,6 +7,9 @@ cache_directory = ".cache/kindertales-scraper"
 
 [archive]
 directory = "archive"
+folder_frequency = "none" # none, daily, monthly, or yearly
+filename_format = "{timestamp:%Y%m%d_%H%M%S}_{sequence:02d}{extension}"
+sidecar_layout = "adjacent" # adjacent or parallel
 
 [synchronization]
 overlap_days = 7
