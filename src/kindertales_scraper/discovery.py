@@ -725,19 +725,16 @@ def parse_legacy_activities(
     activities = []
     for index, box in enumerate(parser.boxes):
         kind = " ".join("".join(box.title).split()) or box.identifier
-        activity_id = _stable_id(
+        base_activity_id = _stable_id(
             child_id,
             activity_date.isoformat(),
             box.identifier,
             str(index),
         )
         media = []
-        captions = set()
         for anchor in box.media:
             split_url = urlsplit(anchor.href)
             source_path = unquote(split_url.path)
-            if anchor.title and anchor.title.strip():
-                captions.add(anchor.title.strip())
             media.append(
                 MediaReference(
                     _stable_id(split_url.netloc, source_path),
@@ -754,36 +751,53 @@ def parse_legacy_activities(
             for text in box.text
             if text != kind and not text.casefold().startswith("javascript:")
         )
-        contexts = {
-            context
-            for medium in media
-            if (context := feed_context.get(medium.id)) is not None
-        }
-        context = next(iter(contexts)) if len(contexts) == 1 else None
-        details: dict[str, Any] = {
-            "text": visible_text,
-            "fields": box.fields,
-        }
-        if context is not None:
-            details["notification"] = {
-                "text": context.text,
-                "published_at": context.published_at.isoformat()
-                if context.published_at is not None
-                else None,
+        grouped_media: dict[FeedContext | None, list[MediaReference]] = {}
+        for medium in media:
+            grouped_media.setdefault(feed_context.get(medium.id), []).append(medium)
+        if not grouped_media:
+            grouped_media[None] = []
+        for group_index, (context, context_media) in enumerate(
+            grouped_media.items()
+        ):
+            details: dict[str, Any] = {
+                "text": visible_text,
+                "fields": box.fields,
             }
-        activities.append(
-            Activity(
-                activity_id,
-                child_id,
-                kind,
-                context.occurred_at
-                if context is not None
-                else dt.datetime.combine(activity_date, dt.time(), timezone),
-                tuple(media),
-                next(iter(captions)) if len(captions) == 1 else None,
-                details=details,
+            if context is not None:
+                details["notification"] = {
+                    "text": context.text,
+                    "published_at": context.published_at.isoformat()
+                    if context.published_at is not None
+                    else None,
+                }
+            captions = {
+                medium.caption
+                for medium in context_media
+                if medium.caption is not None
+            }
+            activity_id = (
+                base_activity_id
+                if group_index == 0
+                else _stable_id(
+                    base_activity_id,
+                    context.occurred_at.isoformat()
+                    if context is not None
+                    else "unmatched",
+                )
             )
-        )
+            activities.append(
+                Activity(
+                    activity_id,
+                    child_id,
+                    kind,
+                    context.occurred_at
+                    if context is not None
+                    else dt.datetime.combine(activity_date, dt.time(), timezone),
+                    tuple(context_media),
+                    next(iter(captions)) if len(captions) == 1 else None,
+                    details=details,
+                )
+            )
     return tuple(activities)
 
 

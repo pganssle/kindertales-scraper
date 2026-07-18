@@ -445,6 +445,14 @@ def test_parse_legacy_daily_report() -> None:
         activity_date,
         dt.UTC,
     ) == ()
+    empty_activity = discovery.parse_legacy_activities(
+        '<div class="contentBoxes" id="empty"></div>',
+        "child-1",
+        activity_date,
+        dt.UTC,
+    )
+    assert len(empty_activity) == 1
+    assert empty_activity[0].media == ()
 
 
 def test_news_feed_supplies_precise_activity_and_publication_times() -> None:
@@ -467,6 +475,9 @@ def test_news_feed_supplies_precise_activity_and_publication_times() -> None:
         "text": ("9:15 AM", "My Day", "@ 1:37 pm", "July 14"),
         "published_at": "2026-07-14T13:37:00-04:00",
     }
+    assert activities[1].occurred_at.isoformat() == "2026-07-14T00:00:00-04:00"
+    assert [medium.filename for medium in activities[0].media] == ["photo.JPG"]
+    assert [medium.filename for medium in activities[1].media] == ["movie.mp4"]
 
 
 def test_news_feed_supplies_non_media_attendance_events() -> None:
@@ -545,7 +556,7 @@ async def test_legacy_adapter_traverses_inclusive_dates() -> None:
                 through_date=dt.date(2026, 7, 16),
             )
         ]
-    assert len(activities) == 5
+    assert len(activities) == 6
     assert len(second_child) == 2
     assert requests[2].url.params["activitydate"] == "07/14/2026"
     assert requests[3].url.params["activitydate"] == "07/15/2026"
