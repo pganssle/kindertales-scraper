@@ -1407,8 +1407,8 @@ class LegacyKindertalesAdapter:
             msg = "legacy Kindertales discovery requires an upper date bound"
             raise DiscoveryError(msg)
         notification_document = await self._notification_document()
-        current = through_date
-        while current >= from_date:
+        current = from_date
+        while current <= through_date:
             response = await self.get(
                 "/index.php",
                 params={
@@ -1431,12 +1431,12 @@ class LegacyKindertalesAdapter:
             ) + parse_notification_activities(
                 notification_document, child_id, current, self.timezone
             )
-            following = current - dt.timedelta(days=1)
+            following = current + dt.timedelta(days=1)
             yield ActivityPage(
                 activities,
-                following.isoformat() if following >= from_date else None,
+                following.isoformat() if following <= through_date else None,
             )
-            current = following
+            current += dt.timedelta(days=1)
 
     @staticmethod
     def activity_page_count(

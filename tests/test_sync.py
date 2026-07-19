@@ -388,7 +388,8 @@ async def test_sync_downloads_standalone_record_documents(
     assert summary.records == 1
     assert row["sha256"] == hashlib.sha256(b"document").hexdigest()
     assert link["document_id"] == "document"
-    assert ("start", progress.Stage.DOCUMENTS, 1) in reporter.events
+    assert ("start", progress.Stage.DOCUMENTS, 0) in reporter.events
+    assert ("extend", progress.Stage.DOCUMENTS, 1) in reporter.events
     assert ("advance", progress.Stage.DOCUMENTS, 1) in reporter.events
 
 
@@ -635,12 +636,8 @@ async def test_sparse_stream_restarts_completed_media_progress(
         configuration,
     ):
         await runner.run(sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2)))
-    starts = [
-        event
-        for event in reporter.events
-        if event == ("start", progress.Stage.MEDIA, 1)
-    ]
-    assert len(starts) == 2
+    assert ("start", progress.Stage.MEDIA, 0) in reporter.events
+    assert reporter.events.count(("start", progress.Stage.MEDIA, 1)) == 1
 
 
 @pytest.mark.asyncio
@@ -731,8 +728,11 @@ async def test_sync_downloads_deduplicates_and_archives(
     assert json.loads(media_row["embedded_fields_json"]) == {"embedded": "yes"}
     assert reporter.events == [
         ("start", progress.Stage.DISCOVERY, 1),
+        ("start", progress.Stage.RECORDS, 0),
+        ("start", progress.Stage.DOCUMENTS, 0),
+        ("start", progress.Stage.MEDIA, 0),
         ("advance", progress.Stage.DISCOVERY, 1),
-        ("start", progress.Stage.MEDIA, 1),
+        ("extend", progress.Stage.MEDIA, 1),
         ("advance", progress.Stage.MEDIA, 1),
         ("close",),
     ]
@@ -784,6 +784,11 @@ async def test_discovery_progress_counts_daily_pages(
         )
     assert reporter.events[:4] == [
         ("start", progress.Stage.DISCOVERY, 3),
+        ("start", progress.Stage.RECORDS, 0),
+        ("start", progress.Stage.DOCUMENTS, 0),
+        ("start", progress.Stage.MEDIA, 0),
+    ]
+    assert reporter.events[4:7] == [
         ("advance", progress.Stage.DISCOVERY, 1),
         ("advance", progress.Stage.DISCOVERY, 1),
         ("advance", progress.Stage.DISCOVERY, 1),

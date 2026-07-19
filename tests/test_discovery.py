@@ -764,8 +764,8 @@ async def test_legacy_adapter_traverses_inclusive_dates() -> None:
         ]
     assert len(activities) == 6
     assert len(second_child) == 2
-    assert requests[2].url.params["activitydate"] == "07/15/2026"
-    assert requests[3].url.params["activitydate"] == "07/14/2026"
+    assert requests[2].url.params["activitydate"] == "07/14/2026"
+    assert requests[3].url.params["activitydate"] == "07/15/2026"
     assert limiter.calls == 5
     assert len(completed_pages) == 2
     assert (

@@ -194,7 +194,7 @@ class SyncEngine:
                 page_complete,
                 child_complete,
             ) = self._discovery_plan(children, bounds, cursors)
-            self.reporter.start(progress.Stage.DISCOVERY, discovery_total)
+            self._start_progress(children, discovery_total)
             activities = await self._activities_for_run(
                 child_bounds,
                 bounds,
@@ -256,6 +256,20 @@ class SyncEngine:
             raise
         finally:
             self.reporter.close()
+
+    def _start_progress(
+        self,
+        children: Sequence[discovery.Child],
+        discovery_total: int,
+    ) -> None:
+        totals = (
+            (progress.Stage.DISCOVERY, discovery_total),
+            (progress.Stage.RECORDS, self._record_request_count(children)),
+            (progress.Stage.DOCUMENTS, 0),
+            (progress.Stage.MEDIA, 0),
+        )
+        for stage, total in totals:
+            self.reporter.start(stage, total)
 
     async def _activities_for_run(
         self,
@@ -404,9 +418,6 @@ class SyncEngine:
         children: Sequence[discovery.Child],
         bounds: Bounds,
     ) -> list[tuple[discovery.Child | None, discovery.Record]]:
-        requests = self._record_request_count(children)
-        if requests:
-            self.reporter.start(progress.Stage.RECORDS, requests)
         return await self._discover_records(children, bounds)
 
     def _record_request_count(self, children: Sequence[discovery.Child]) -> int:
@@ -483,7 +494,7 @@ class SyncEngine:
                     order=order,
                 )
             )
-        self.reporter.start(progress.Stage.MEDIA, len(first_media))
+        self.reporter.extend(progress.Stage.MEDIA, len(first_media))
         results = await graph.run()
         failures = tuple(
             result.error
@@ -519,7 +530,7 @@ class SyncEngine:
             self.settings.request_policy.max_in_flight,
             self.settings.request_policy.max_media_downloads,
         )
-        self.reporter.start(progress.Stage.DOCUMENTS, len(first_documents))
+        self.reporter.extend(progress.Stage.DOCUMENTS, len(first_documents))
         for order, (document_id, (child, record, document)) in enumerate(
             first_documents.items()
         ):
@@ -712,6 +723,7 @@ class _ActivityPipeline:
     associations: list[tuple[str, str]] = attrs.field(factory=list, init=False)
     media_ids: set[str] = attrs.field(factory=set, init=False)
     media_pending: int = attrs.field(default=0, init=False)
+    media_bar_open: bool = attrs.field(default=True, init=False)
     order: int = attrs.field(default=0, init=False)
 
     def __attrs_post_init__(self) -> None:
@@ -798,16 +810,19 @@ class _ActivityPipeline:
         if medium.id in self.media_ids:
             return
         self.media_ids.add(medium.id)
-        if self.media_pending:
+        if self.media_bar_open:
             self.engine.reporter.extend(progress.Stage.MEDIA, 1)
         else:
             self.engine.reporter.start(progress.Stage.MEDIA, 1)
+            self.media_bar_open = True
         self.media_pending += 1
 
         async def download() -> None:
             await self.download_media(child, activity, medium)
             self.engine.reporter.advance(progress.Stage.MEDIA)
             self.media_pending -= 1
+            if not self.media_pending:
+                self.media_bar_open = False
 
         self._add_work(
             scheduler.Work(
