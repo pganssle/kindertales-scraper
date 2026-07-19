@@ -348,16 +348,14 @@ class SyncEngine:
     def _effective_from(
         self, requested: dt.date | None, cursor: str | None
     ) -> dt.date | None:
+        if requested is not None:
+            return requested
         resumed = None
         if cursor is not None:
             resumed = dt.datetime.fromisoformat(cursor).date() - dt.timedelta(
                 days=self.settings.overlap_days
             )
-        if requested is None:
-            return resumed
-        if resumed is None:
-            return requested
-        return max(requested, resumed)
+        return resumed
 
     @staticmethod
     def _included(activity: discovery.Activity, bounds: Bounds) -> bool:

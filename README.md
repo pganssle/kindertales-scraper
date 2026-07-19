@@ -107,9 +107,12 @@ kindertales-scraper credentials delete
 
 If `--through` is omitted, synchronization runs through the current local date.
 
-The current legacy HTML adapter still requires `--from`. Later bounded runs use
-the latest per-child activity timestamp with the configured seven-day overlap.
-Archived files are never deleted.
+The current legacy HTML adapter still requires `--from`. An explicit `--from`
+date is authoritative, including when it predates the latest saved cursor, so
+it can be used to backfill older history. When no start date is supplied by an
+adapter that supports it, synchronization resumes from the latest per-child
+activity timestamp with the configured seven-day overlap. Archived files are
+never deleted.
 
 Activity discovery reports one page per child and date. Record discovery grows
 its total as message pagination and individual messages are discovered.

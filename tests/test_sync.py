@@ -520,11 +520,11 @@ async def test_discovery_progress_counts_daily_pages(
 
 
 @pytest.mark.asyncio
-async def test_resume_uses_overlap_and_requested_lower_bound(
+async def test_explicit_historical_start_precedes_resume_cursor(
     tmp_path: Path,
     records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
 ) -> None:
-    """Resume honors its lower bound and defaults the upper bound to today."""
+    """An explicit historical backfill is not narrowed by a newer cursor."""
     child, _ = records
     older = discovery.Activity(
         "older",
@@ -540,11 +540,28 @@ async def test_resume_uses_overlap_and_requested_lower_bound(
     ):
         run_id = store.begin_sync()
         store.finish_sync(run_id, "complete", {child.id: "2026-07-15T10:00:00+00:00"})
-        await runner.run(sync.Bounds(from_date=dt.date(2026, 7, 10)))
+        await runner.run(sync.Bounds(from_date=dt.date(2022, 6, 1)))
         assert store.latest_cursors()[child.id] == "2026-07-15T10:00:00+00:00"
     after = dt.datetime.now().astimezone().date()
-    assert adapter.bounds[0][0] == dt.date(2026, 7, 10)
+    assert adapter.bounds[0][0] == dt.date(2022, 6, 1)
     assert adapter.bounds[0][1] in {before, after}
+
+
+@pytest.mark.asyncio
+async def test_resume_without_explicit_start_uses_overlap(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """An omitted start date resumes from the stored cursor with overlap."""
+    child, _ = records
+    adapter = FakeAdapter((child,), ())
+    async for runner, store in engine(
+        tmp_path, adapter, httpx.MockTransport(lambda _: httpx.Response(500))
+    ):
+        run_id = store.begin_sync()
+        store.finish_sync(run_id, "complete", {child.id: "2026-07-15T10:00:00+00:00"})
+        await runner.run(sync.Bounds(through_date=dt.date(2026, 7, 16)))
+    assert adapter.bounds[0] == (dt.date(2026, 7, 8), dt.date(2026, 7, 16))
 
 
 @pytest.mark.asyncio
