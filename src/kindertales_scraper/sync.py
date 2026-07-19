@@ -5,7 +5,7 @@ import hashlib
 import tempfile
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, Self, cast, runtime_checkable
 
 import attrs
 import httpx
@@ -101,6 +101,15 @@ class Bounds:
             msg = "--from cannot be later than --through"
             raise SyncError(msg)
 
+    def with_default_through(self) -> Self:
+        """Return bounds ending on the current local date when unspecified."""
+        if self.through_date is not None:
+            return self
+        return attrs.evolve(
+            self,
+            through_date=dt.datetime.now().astimezone().date(),
+        )
+
 
 @attrs.frozen
 class SyncSummary:
@@ -137,6 +146,10 @@ class SyncEngine:
         """Synchronize all exposed media within the effective date bounds."""
         if bounds is None:
             bounds = Bounds()
+        all_history_requested = (
+            bounds.from_date is None and bounds.through_date is None
+        )
+        bounds = bounds.with_default_through()
         run_id = None if dry_run else self.store.begin_sync()
         cursors = dict(self.store.latest_cursors())
         try:
@@ -185,7 +198,7 @@ class SyncEngine:
                 self.store.mark_unavailable(
                     "records", tuple(record.id for _, record in records)
                 )
-            if not cursors and bounds.from_date is None and bounds.through_date is None:
+            if not cursors and all_history_requested:
                 self.store.mark_unavailable(
                     "activities",
                     tuple(activity.id for _, activity in activities),

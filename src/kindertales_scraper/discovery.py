@@ -1007,8 +1007,11 @@ class LegacyKindertalesAdapter:
     ) -> AsyncIterator[Activity]:
         """Yield daily-report activities over an inclusive bounded range."""
         del cursor
-        if from_date is None or through_date is None:
-            msg = "legacy Kindertales discovery requires --from and --through"
+        if from_date is None:
+            msg = "legacy Kindertales discovery requires --from"
+            raise DiscoveryError(msg)
+        if through_date is None:
+            msg = "legacy Kindertales discovery requires an upper date bound"
             raise DiscoveryError(msg)
         notification_document = await self._notification_document()
         current = from_date
@@ -1061,8 +1064,11 @@ class LegacyKindertalesAdapter:
         through_date: dt.date | None = None,
     ) -> tuple[Record, ...]:
         """Snapshot the read-only report and profile areas for one child."""
-        if from_date is None or through_date is None:
-            msg = "legacy attendance discovery requires --from and --through"
+        if from_date is None:
+            msg = "legacy attendance discovery requires --from"
+            raise DiscoveryError(msg)
+        if through_date is None:
+            msg = "legacy attendance discovery requires an upper date bound"
             raise DiscoveryError(msg)
         observed_at = dt.datetime.now(dt.UTC)
         notification_document = await self._notification_document()

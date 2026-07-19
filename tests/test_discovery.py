@@ -741,8 +741,11 @@ async def test_child_record_enrollment_response_must_be_an_object(
 async def test_child_records_require_date_bounds() -> None:
     """Attendance records cannot silently escape the requested range."""
     async with httpx.AsyncClient(base_url="https://example.test") as client:
-        with pytest.raises(discovery.DiscoveryError, match="--from and --through"):
-            await discovery.LegacyKindertalesAdapter(client).child_records("child")
+        adapter = discovery.LegacyKindertalesAdapter(client)
+        with pytest.raises(discovery.DiscoveryError, match="requires --from"):
+            await adapter.child_records("child")
+        with pytest.raises(discovery.DiscoveryError, match="upper date bound"):
+            await adapter.child_records("child", from_date=dt.date(2026, 7, 14))
 
 
 @pytest.mark.asyncio
@@ -799,8 +802,16 @@ async def test_legacy_adapter_requires_explicit_bounds() -> None:
     """The HTML adapter refuses an accidental unbounded history traversal."""
     async with httpx.AsyncClient(base_url="https://example.test") as client:
         adapter = discovery.LegacyKindertalesAdapter(client)
-        with pytest.raises(discovery.DiscoveryError, match="--from and --through"):
+        with pytest.raises(discovery.DiscoveryError, match="requires --from"):
             _ = [item async for item in adapter.activities("child-1")]
+        with pytest.raises(discovery.DiscoveryError, match="upper date bound"):
+            _ = [
+                item
+                async for item in adapter.activities(
+                    "child-1",
+                    from_date=dt.date(2026, 7, 14),
+                )
+            ]
 
 
 @pytest.mark.asyncio

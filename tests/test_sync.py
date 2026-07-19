@@ -350,7 +350,7 @@ async def test_resume_uses_overlap_and_requested_lower_bound(
     tmp_path: Path,
     records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
 ) -> None:
-    """Stored timestamps overlap by seven days but never precede an explicit bound."""
+    """Resume honors its lower bound and defaults the upper bound to today."""
     child, _ = records
     older = discovery.Activity(
         "older",
@@ -360,6 +360,7 @@ async def test_resume_uses_overlap_and_requested_lower_bound(
         (),
     )
     adapter = FakeAdapter((child,), (older,))
+    before = dt.datetime.now().astimezone().date()
     async for runner, store in engine(
         tmp_path, adapter, httpx.MockTransport(lambda _: httpx.Response(500))
     ):
@@ -367,7 +368,9 @@ async def test_resume_uses_overlap_and_requested_lower_bound(
         store.finish_sync(run_id, "complete", {child.id: "2026-07-15T10:00:00+00:00"})
         await runner.run(sync.Bounds(from_date=dt.date(2026, 7, 10)))
         assert store.latest_cursors()[child.id] == "2026-07-15T10:00:00+00:00"
-    assert adapter.bounds == [(dt.date(2026, 7, 10), None)]
+    after = dt.datetime.now().astimezone().date()
+    assert adapter.bounds[0][0] == dt.date(2026, 7, 10)
+    assert adapter.bounds[0][1] in {before, after}
 
 
 @pytest.mark.asyncio

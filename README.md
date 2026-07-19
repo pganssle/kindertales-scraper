@@ -103,9 +103,11 @@ kindertales-scraper verify
 kindertales-scraper credentials delete
 ```
 
-The current legacy HTML adapter requires both date bounds. Later bounded runs
-use the latest per-child activity timestamp with the configured seven-day
-overlap. Archived files are never deleted.
+If `--through` is omitted, synchronization runs through the current local date.
+
+The current legacy HTML adapter still requires `--from`. Later bounded runs use
+the latest per-child activity timestamp with the configured seven-day overlap.
+Archived files are never deleted.
 
 ## Archive and privacy
 
