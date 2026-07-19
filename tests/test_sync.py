@@ -1,9 +1,10 @@
 """Tests for resumable end-to-end synchronization."""
 
+import asyncio
 import datetime as dt
 import hashlib
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 import attrs
@@ -156,6 +157,63 @@ class CountedFakeAdapter(FakeAdapter):
             through_date=through_date,
         ):
             yield activity
+
+
+class PagedFakeAdapter(FakeAdapter):
+    """Expose individual pages and record when discovery reaches each one."""
+
+    def __init__(
+        self,
+        children: tuple[discovery.Child, ...],
+        activities: tuple[discovery.Activity, ...],
+        events: list[str],
+        page_hook: Callable[[dt.date], Awaitable[None]] | None = None,
+    ) -> None:
+        super().__init__(children, activities)
+        self.events = events
+        self.page_hook = page_hook
+
+    async def activity_pages(
+        self,
+        child_id: str,
+        *,
+        cursor: str | None = None,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
+    ) -> AsyncIterator[discovery.ActivityPage]:
+        assert cursor is None
+        assert from_date is not None
+        assert through_date is not None
+        current = from_date
+        while current <= through_date:
+            if self.page_hook is not None:
+                await self.page_hook(current)
+            self.events.append(f"page:{current.isoformat()}")
+            following = current + dt.timedelta(days=1)
+            yield discovery.ActivityPage(
+                tuple(
+                    activity
+                    for activity in self.activity_records
+                    if activity.child_id == child_id
+                    and activity.occurred_at.date() == current
+                ),
+                following.isoformat() if following <= through_date else None,
+            )
+            current = following
+
+
+class StreamingFakeAdapter(PagedFakeAdapter):
+    """Expose a known page count in addition to streaming pages."""
+
+    @staticmethod
+    def activity_page_count(
+        *,
+        from_date: dt.date | None,
+        through_date: dt.date | None,
+    ) -> int:
+        assert from_date is not None
+        assert through_date is not None
+        return (through_date - from_date).days + 1
 
 
 class FakeDocumentAdapter(FakeRecordAdapter):
@@ -393,9 +451,10 @@ async def engine(
     adapter: FakeAdapter,
     handler: httpx.AsyncBaseTransport,
     reporter: progress.Reporter | None = None,
+    configuration: config.Config | None = None,
 ) -> AsyncIterator[tuple[sync.SyncEngine, archive.Archive]]:
     """Yield an engine with open HTTP and archive resources."""
-    configuration = settings(tmp_path)
+    configuration = configuration or settings(tmp_path)
     async with httpx.AsyncClient(transport=handler) as client:
         with archive.Archive(configuration.archive_directory) as store:
             requester = scheduler.Requester(
@@ -413,6 +472,218 @@ async def engine(
                 ),
                 store,
             )
+
+
+@pytest.mark.asyncio
+async def test_streaming_sync_prioritizes_media_before_the_next_page(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """New media runs before continuing discovery when one slot is available."""
+    child, activities = records
+    events: list[str] = []
+    adapter = StreamingFakeAdapter((child,), activities, events)
+    configuration = settings(tmp_path)
+    configuration = attrs.evolve(
+        configuration,
+        request_policy=attrs.evolve(
+            configuration.request_policy,
+            max_in_flight=1,
+            max_media_downloads=1,
+        ),
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        events.append("media")
+        return httpx.Response(
+            200,
+            content=b"source",
+            headers={"Content-Type": "image/jpeg"},
+        )
+
+    async for runner, store in engine(
+        tmp_path,
+        adapter,
+        httpx.MockTransport(handler),
+        configuration=configuration,
+    ):
+        summary = await runner.run(
+            sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2))
+        )
+        links = store.connection.execute("SELECT * FROM activity_media").fetchall()
+    assert events == ["page:2026-07-01", "media", "page:2026-07-02"]
+    assert summary == sync.SyncSummary(1, 2, 1, dry_run=False)
+    assert len(links) == 2
+
+
+@pytest.mark.asyncio
+async def test_streaming_sync_discovers_while_media_is_downloading(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """A spare slot continues discovery while a media stream remains active."""
+    child, activities = records
+    events: list[str] = []
+    media_started = asyncio.Event()
+    second_page = asyncio.Event()
+
+    async def page_hook(current: dt.date) -> None:
+        if current == dt.date(2026, 7, 2):
+            await media_started.wait()
+            second_page.set()
+
+    adapter = StreamingFakeAdapter((child,), activities, events, page_hook)
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        events.append("media:start")
+        media_started.set()
+        await second_page.wait()
+        events.append("media:finish")
+        return httpx.Response(
+            200,
+            content=b"source",
+            headers={"Content-Type": "image/jpeg"},
+        )
+
+    async for runner, _store in engine(
+        tmp_path,
+        adapter,
+        httpx.MockTransport(handler),
+    ):
+        await asyncio.wait_for(
+            runner.run(sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2))),
+            timeout=2,
+        )
+    assert events == [
+        "page:2026-07-01",
+        "media:start",
+        "page:2026-07-02",
+        "media:finish",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_uncounted_stream_extends_discovery_and_media_progress(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """Unknown pagination and newly found media grow their active totals."""
+    child, activities = records
+    second_medium = attrs.evolve(
+        activities[1].media[0],
+        id="media-2",
+        url="https://example.test/media-2.jpg",
+    )
+    distinct = (activities[0], attrs.evolve(activities[1], media=(second_medium,)))
+    reporter = RecordingReporter()
+    adapter = PagedFakeAdapter((child,), distinct, [])
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"source",
+            headers={"Content-Type": "image/jpeg"},
+        )
+
+    async for runner, _store in engine(
+        tmp_path,
+        adapter,
+        httpx.MockTransport(handler),
+        reporter,
+    ):
+        await runner.run(sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2)))
+    assert ("extend", progress.Stage.DISCOVERY, 1) in reporter.events
+    assert ("extend", progress.Stage.MEDIA, 1) in reporter.events
+
+
+@pytest.mark.asyncio
+async def test_sparse_stream_restarts_completed_media_progress(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """A later medium starts a new bar after the preceding download completed."""
+    child, activities = records
+    second_medium = attrs.evolve(
+        activities[1].media[0],
+        id="media-2",
+        url="https://example.test/media-2.jpg",
+    )
+    distinct = (activities[0], attrs.evolve(activities[1], media=(second_medium,)))
+    reporter = RecordingReporter()
+    adapter = StreamingFakeAdapter((child,), distinct, [])
+    configuration = settings(tmp_path)
+    configuration = attrs.evolve(
+        configuration,
+        request_policy=attrs.evolve(
+            configuration.request_policy,
+            max_in_flight=1,
+            max_media_downloads=1,
+        ),
+    )
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=b"source",
+            headers={"Content-Type": "image/jpeg"},
+        )
+    )
+    async for runner, _store in engine(
+        tmp_path,
+        adapter,
+        transport,
+        reporter,
+        configuration,
+    ):
+        await runner.run(sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2)))
+    starts = [
+        event
+        for event in reporter.events
+        if event == ("start", progress.Stage.MEDIA, 1)
+    ]
+    assert len(starts) == 2
+
+
+@pytest.mark.asyncio
+async def test_streaming_sync_filters_bounds_and_reports_media_failure(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """Streaming applies bounds before archiving and groups download failures."""
+    child, activities = records
+    older = attrs.evolve(
+        activities[0],
+        id="outside",
+        occurred_at=dt.datetime(2026, 6, 30, tzinfo=dt.UTC),
+        media=(),
+    )
+
+    class MixedPageAdapter(PagedFakeAdapter):
+        async def activity_pages(
+            self,
+            child_id: str,
+            *,
+            cursor: str | None = None,
+            from_date: dt.date | None = None,
+            through_date: dt.date | None = None,
+        ) -> AsyncIterator[discovery.ActivityPage]:
+            del child_id, cursor, from_date, through_date
+            yield discovery.ActivityPage((older, activities[0]))
+
+    adapter = MixedPageAdapter((child,), activities, [])
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=b"bad",
+            headers={"Content-Type": "text/html"},
+        )
+    )
+    async for runner, store in engine(tmp_path, adapter, transport):
+        with pytest.raises(ExceptionGroup, match="archive tasks"):
+            await runner.run(
+                sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 1))
+            )
+        archived = store.connection.execute("SELECT id FROM activities").fetchall()
+    assert [row["id"] for row in archived] == ["activity-1"]
 
 
 @pytest.mark.asyncio

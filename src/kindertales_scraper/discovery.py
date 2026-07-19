@@ -1,5 +1,6 @@
 """Typed discovery of children, activities, and media references."""
 
+import asyncio
 import datetime as dt
 import hashlib
 import html.parser
@@ -1330,6 +1331,7 @@ class LegacyKindertalesAdapter:
     requester: scheduler.Requester | None = None
     timezone: dt.tzinfo = attrs.field(factory=lambda: ZoneInfo("America/New_York"))
     _notification_documents: list[str] = attrs.field(factory=list, init=False)
+    _notification_lock: asyncio.Lock = attrs.field(factory=asyncio.Lock, init=False)
 
     async def get(
         self,
@@ -1377,6 +1379,26 @@ class LegacyKindertalesAdapter:
         page_complete: Callable[[], None] | None = None,
     ) -> AsyncIterator[Activity]:
         """Yield daily-report activities over an inclusive bounded range."""
+        async for page in self.activity_pages(
+            child_id,
+            cursor=cursor,
+            from_date=from_date,
+            through_date=through_date,
+        ):
+            if page_complete is not None:
+                page_complete()
+            for activity in page.activities:
+                yield activity
+
+    async def activity_pages(
+        self,
+        child_id: str,
+        *,
+        cursor: str | None = None,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
+    ) -> AsyncIterator[ActivityPage]:
+        """Yield one independently schedulable daily-report page at a time."""
         del cursor
         if from_date is None:
             msg = "legacy Kindertales discovery requires --from"
@@ -1396,9 +1418,7 @@ class LegacyKindertalesAdapter:
                 },
             )
             response.raise_for_status()
-            if page_complete is not None:
-                page_complete()
-            for activity in parse_legacy_activities(
+            activities = parse_legacy_activities(
                 response.text,
                 child_id,
                 current,
@@ -1408,15 +1428,14 @@ class LegacyKindertalesAdapter:
                     current,
                     self.timezone,
                 ),
-            ):
-                yield activity
-            for activity in parse_notification_activities(
-                notification_document,
-                child_id,
-                current,
-                self.timezone,
-            ):
-                yield activity
+            ) + parse_notification_activities(
+                notification_document, child_id, current, self.timezone
+            )
+            following = current + dt.timedelta(days=1)
+            yield ActivityPage(
+                activities,
+                following.isoformat() if following <= through_date else None,
+            )
             current += dt.timedelta(days=1)
 
     @staticmethod
@@ -1432,12 +1451,14 @@ class LegacyKindertalesAdapter:
 
     async def _notification_document(self) -> str:
         if not self._notification_documents:
-            response = await self.get(
-                "/modules/notificationsV2/notificationsv2.php",
-                params={"limit": "200", "offset": "0"},
-            )
-            response.raise_for_status()
-            self._notification_documents.append(response.text)
+            async with self._notification_lock:
+                if not self._notification_documents:
+                    response = await self.get(
+                        "/modules/notificationsV2/notificationsv2.php",
+                        params={"limit": "200", "offset": "0"},
+                    )
+                    response.raise_for_status()
+                    self._notification_documents.append(response.text)
         return self._notification_documents[0]
 
     async def child_records(
@@ -1707,6 +1728,26 @@ class KindertalesAdapter:
         page_complete: Callable[[], None] | None = None,
     ) -> AsyncIterator[Activity]:
         """Yield all activity pages, rejecting repeated cursors."""
+        async for page in self.activity_pages(
+            child_id,
+            cursor=cursor,
+            from_date=from_date,
+            through_date=through_date,
+        ):
+            if page_complete is not None:
+                page_complete()
+            for activity in page.activities:
+                yield activity
+
+    async def activity_pages(
+        self,
+        child_id: str,
+        *,
+        cursor: str | None = None,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
+    ) -> AsyncIterator[ActivityPage]:
+        """Yield independently schedulable API pages."""
         seen: set[str] = set()
         next_cursor = cursor
         while True:
@@ -1727,10 +1768,7 @@ class KindertalesAdapter:
                 msg = "activities response must be an object"
                 raise DiscoveryError(msg)
             page = parse_activity_page(payload)
-            if page_complete is not None:
-                page_complete()
-            for activity in page.activities:
-                yield activity
+            yield page
             if page.next_cursor is None:
                 return
             if page.next_cursor in seen:

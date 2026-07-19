@@ -115,7 +115,11 @@ activity timestamp with the configured seven-day overlap. Archived files are
 never deleted.
 
 Activity discovery reports one page per child and date. Record discovery grows
-its total as message pagination and individual messages are discovered.
+its total as message pagination and individual messages are discovered. During
+a real sync, each completed activity page immediately adds its media to a live
+priority queue. Ready media is admitted before queued discovery work, with at
+most two media downloads active, while spare request capacity continues through
+later activity pages. A dry run performs discovery without requesting media.
 
 ## Archive and privacy
 

@@ -1,5 +1,6 @@
 """Tests for child, activity, and media discovery."""
 
+import asyncio
 import datetime as dt
 import json
 from collections.abc import Callable, Mapping
@@ -781,6 +782,41 @@ async def test_legacy_adapter_traverses_inclusive_dates() -> None:
         )
         == 0
     )
+    assert sum("notificationsV2" in request.url.path for request in requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_adapter_shares_notifications_across_concurrent_children() -> None:
+    """Concurrent child discovery performs the shared feed request only once."""
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if "notificationsV2" in request.url.path:
+            await asyncio.sleep(0)
+            return httpx.Response(200, text=LEGACY_FEED)
+        return httpx.Response(200, text=LEGACY_REPORT)
+
+    async with httpx.AsyncClient(
+        base_url="https://example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = discovery.LegacyKindertalesAdapter(client, timezone=dt.UTC)
+
+        async def collect(child_id: str) -> tuple[discovery.Activity, ...]:
+            items = [
+                item
+                async for item in adapter.activities(
+                    child_id,
+                    from_date=dt.date(2026, 7, 14),
+                    through_date=dt.date(2026, 7, 14),
+                )
+            ]
+            return tuple(items)
+
+        first, second = await asyncio.gather(collect("child-1"), collect("child-2"))
+    assert first
+    assert second
     assert sum("notificationsV2" in request.url.path for request in requests) == 1
 
 

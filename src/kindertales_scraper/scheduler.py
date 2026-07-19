@@ -3,6 +3,7 @@
 import asyncio
 import datetime as dt
 import email.utils
+import heapq
 import random
 import time
 from collections import deque
@@ -186,6 +187,80 @@ class DAGScheduler:
 
 
 @attrs.define
+class DynamicScheduler:
+    """Run priority work that may enqueue more work while it is running."""
+
+    max_in_flight: int
+    max_media_downloads: int
+    _queue: asyncio.PriorityQueue[tuple[tuple[int, int, int], int, Work]] = attrs.field(
+        factory=asyncio.PriorityQueue, init=False
+    )
+    _keys: set[str] = attrs.field(factory=set, init=False)
+    _sequence: int = attrs.field(default=0, init=False)
+    _running: bool = attrs.field(default=False, init=False)
+    _finished: bool = attrs.field(default=False, init=False)
+
+    def add(self, work: Work) -> None:
+        """Add work before or during a run, ordered by media, depth, and order."""
+        if self._finished:
+            msg = "cannot add work after the scheduler has finished"
+            raise GraphError(msg)
+        if work.dependencies:
+            msg = "dynamic work expresses dependencies by enqueueing successors"
+            raise GraphError(msg)
+        if work.key in self._keys:
+            msg = f"duplicate work key: {work.key}"
+            raise GraphError(msg)
+        self._keys.add(work.key)
+        priority = (-int(work.media), -work.depth, work.order)
+        self._queue.put_nowait((priority, self._sequence, work))
+        self._sequence += 1
+
+    async def run(self) -> Mapping[str, WorkResult]:
+        """Run until every initial and dynamically generated item completes."""
+        if self._running or self._finished:
+            msg = "dynamic scheduler can only run once"
+            raise GraphError(msg)
+        self._running = True
+        results: dict[str, WorkResult] = {}
+        media = asyncio.Semaphore(self.max_media_downloads)
+        workers = tuple(
+            asyncio.create_task(self._worker(results, media))
+            for _ in range(self.max_in_flight)
+        )
+        try:
+            await self._queue.join()
+        finally:
+            self._finished = True
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+        return results
+
+    async def _worker(
+        self,
+        results: dict[str, WorkResult],
+        media: asyncio.Semaphore,
+    ) -> None:
+        while True:
+            _priority, _sequence, work = await self._queue.get()
+            try:
+                results[work.key] = await self._execute(work, media)
+            finally:
+                self._queue.task_done()
+
+    @staticmethod
+    async def _execute(work: Work, media: asyncio.Semaphore) -> WorkResult:
+        try:
+            if work.media:
+                async with media:
+                    return WorkResult(value=await work.action())
+            return WorkResult(value=await work.action())
+        except Exception as error:  # noqa: BLE001
+            return WorkResult(error=error)
+
+
+@attrs.define
 class Requester:
     """Apply quotas, concurrency, retries, and stop conditions to requests."""
 
@@ -195,6 +270,11 @@ class Requester:
     _total: asyncio.Semaphore = attrs.field(init=False)
     _media: asyncio.Semaphore = attrs.field(init=False)
     _forbidden: int = attrs.field(default=0, init=False)
+    _admissions: list[tuple[int, int, asyncio.Future[float]]] = attrs.field(
+        factory=list, init=False
+    )
+    _admission_sequence: int = attrs.field(default=0, init=False)
+    _dispatcher: asyncio.Task[None] | None = attrs.field(default=None, init=False)
 
     def __attrs_post_init__(self) -> None:
         """Create concurrency controls from the request policy."""
@@ -204,7 +284,7 @@ class Requester:
     async def request(self, send: Sender, *, media: bool = False) -> httpx.Response:
         """Send a request, counting every retry against configured quotas."""
         for attempt in range(self.policy.max_retries + 1):
-            await self.limiter.acquire()
+            await self._acquire(media=media)
             try:
                 async with self._total:
                     if media:
@@ -230,6 +310,31 @@ class Requester:
                 return response
             await self.sleep(self._retry_delay(response, attempt))
         raise RuntimeError  # pragma: no cover
+
+    async def _acquire(self, *, media: bool) -> float:
+        loop = asyncio.get_running_loop()
+        admitted = loop.create_future()
+        heapq.heappush(
+            self._admissions,
+            (-int(media), self._admission_sequence, admitted),
+        )
+        self._admission_sequence += 1
+        if self._dispatcher is None:
+            self._dispatcher = asyncio.create_task(self._dispatch_admissions())
+        return await asyncio.shield(admitted)
+
+    async def _dispatch_admissions(self) -> None:
+        try:
+            while self._admissions:
+                _priority, _sequence, admitted = heapq.heappop(self._admissions)
+                try:
+                    dispatch = await self.limiter.acquire()
+                except Exception as error:  # noqa: BLE001
+                    admitted.set_exception(error)
+                else:
+                    admitted.set_result(dispatch)
+        finally:
+            self._dispatcher = None
 
     @staticmethod
     def _retry_delay(response: httpx.Response, attempt: int) -> float:

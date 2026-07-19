@@ -3,7 +3,7 @@
 import datetime as dt
 import hashlib
 import tempfile
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, Self, cast, runtime_checkable
 
@@ -58,6 +58,22 @@ class CountedActivityAdapter(Protocol):
         through_date: dt.date | None,
     ) -> int:
         """Return the number of requests needed for one child."""
+        ...
+
+
+@runtime_checkable
+class PagedActivityAdapter(Protocol):
+    """Activity adapter that exposes independently schedulable pages."""
+
+    def activity_pages(
+        self,
+        child_id: str,
+        *,
+        cursor: str | None = None,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
+    ) -> AsyncIterator[discovery.ActivityPage]:
+        """Iterate bounded activity pages."""
         ...
 
 
@@ -179,22 +195,13 @@ class SyncEngine:
                 child_complete,
             ) = self._discovery_plan(children, bounds, cursors)
             self.reporter.start(progress.Stage.DISCOVERY, discovery_total)
-            activities: list[tuple[discovery.Child, discovery.Activity]] = []
-            records: list[tuple[discovery.Child | None, discovery.Record]] = []
-            for child, effective_from in child_bounds:
-                activities.extend(
-                    [
-                        (child, activity)
-                        async for activity in self.adapter.activities(
-                            child.id,
-                            from_date=effective_from,
-                            through_date=bounds.through_date,
-                            page_complete=page_complete,
-                        )
-                        if self._included(activity, bounds)
-                    ]
-                )
-                child_complete()
+            activities = await self._activities_for_run(
+                child_bounds,
+                bounds,
+                page_complete,
+                child_complete,
+                dry_run=dry_run,
+            )
             records = await self._discover_records_with_progress(children, bounds)
             media_count = len(
                 {medium.id for _, item in activities for medium in item.media}
@@ -212,7 +219,8 @@ class SyncEngine:
             for record_child, record in records:
                 self.store.store_record(record, record_child)
             await self._archive_documents(records)
-            await self._archive_activities(activities)
+            if not isinstance(self.adapter, PagedActivityAdapter):
+                await self._archive_activities(activities)
             cursor_updates = self._cursor_updates(activities, cursors)
             self.store.mark_unavailable(
                 "children", tuple(child.id for child in children)
@@ -248,6 +256,70 @@ class SyncEngine:
             raise
         finally:
             self.reporter.close()
+
+    async def _activities_for_run(
+        self,
+        child_bounds: Sequence[tuple[discovery.Child, dt.date | None]],
+        bounds: Bounds,
+        page_complete: Callable[[], None] | None,
+        child_complete: Callable[[], None],
+        *,
+        dry_run: bool,
+    ) -> list[tuple[discovery.Child, discovery.Activity]]:
+        if dry_run or not isinstance(self.adapter, PagedActivityAdapter):
+            return await self._discover_activities(
+                child_bounds,
+                bounds,
+                page_complete,
+                child_complete,
+            )
+        for child, _effective_from in child_bounds:
+            self.store.upsert_child(child)
+        return await self._stream_activities(
+            child_bounds,
+            bounds,
+            counted=isinstance(self.adapter, CountedActivityAdapter),
+        )
+
+    async def _discover_activities(
+        self,
+        child_bounds: Sequence[tuple[discovery.Child, dt.date | None]],
+        bounds: Bounds,
+        page_complete: Callable[[], None] | None,
+        child_complete: Callable[[], None],
+    ) -> list[tuple[discovery.Child, discovery.Activity]]:
+        activities: list[tuple[discovery.Child, discovery.Activity]] = []
+        for child, effective_from in child_bounds:
+            activities.extend(
+                [
+                    (child, activity)
+                    async for activity in self.adapter.activities(
+                        child.id,
+                        from_date=effective_from,
+                        through_date=bounds.through_date,
+                        page_complete=page_complete,
+                    )
+                    if self._included(activity, bounds)
+                ]
+            )
+            child_complete()
+        return activities
+
+    async def _stream_activities(
+        self,
+        child_bounds: Sequence[tuple[discovery.Child, dt.date | None]],
+        bounds: Bounds,
+        *,
+        counted: bool,
+    ) -> list[tuple[discovery.Child, discovery.Activity]]:
+        pipeline = _ActivityPipeline(
+            self,
+            bounds,
+            counted,
+            self._included,
+            self._download,
+        )
+        return await pipeline.run(child_bounds)
 
     def _discovery_plan(
         self,
@@ -619,6 +691,150 @@ class SyncEngine:
             ) > dt.datetime.fromisoformat(current):
                 updated[child.id] = value
         return updated
+
+
+@attrs.define
+class _ActivityPipeline:
+    """Expand activity pages into prioritized media work while discovery runs."""
+
+    engine: SyncEngine
+    bounds: Bounds
+    counted: bool
+    included: Callable[[discovery.Activity, Bounds], bool]
+    download_media: Callable[
+        [discovery.Child, discovery.Activity, discovery.MediaReference],
+        Awaitable[None],
+    ]
+    graph: scheduler.DynamicScheduler = attrs.field(init=False)
+    activities: list[tuple[discovery.Child, discovery.Activity]] = attrs.field(
+        factory=list, init=False
+    )
+    associations: list[tuple[str, str]] = attrs.field(factory=list, init=False)
+    media_ids: set[str] = attrs.field(factory=set, init=False)
+    media_pending: int = attrs.field(default=0, init=False)
+    order: int = attrs.field(default=0, init=False)
+
+    def __attrs_post_init__(self) -> None:
+        policy = self.engine.settings.request_policy
+        self.graph = scheduler.DynamicScheduler(
+            policy.max_in_flight,
+            policy.max_media_downloads,
+        )
+
+    async def run(
+        self,
+        child_bounds: Sequence[tuple[discovery.Child, dt.date | None]],
+    ) -> list[tuple[discovery.Child, discovery.Activity]]:
+        adapter = cast("PagedActivityAdapter", self.engine.adapter)
+        for child, effective_from in child_bounds:
+            pages = adapter.activity_pages(
+                child.id,
+                from_date=effective_from,
+                through_date=self.bounds.through_date,
+            )
+            self.schedule_page(child, pages, 0, self._depth(effective_from))
+        results = await self.graph.run()
+        failures = tuple(
+            result.error
+            for result in results.values()
+            if isinstance(result.error, Exception)
+        )
+        if failures:
+            msg = "one or more archive tasks failed"
+            raise ExceptionGroup(msg, failures)
+        for activity_id, media_id in self.associations:
+            self.engine.store.link_media(activity_id, media_id)
+        return self.activities
+
+    def schedule_page(
+        self,
+        child: discovery.Child,
+        pages: AsyncIterator[discovery.ActivityPage],
+        page_number: int,
+        depth: int,
+    ) -> None:
+        async def discover() -> None:
+            page = await anext(pages)
+            self._report_page(page)
+            self._store_page(child, page, depth)
+            if page.next_cursor is not None:
+                self.schedule_page(
+                    child,
+                    pages,
+                    page_number + 1,
+                    max(0, depth - 1),
+                )
+
+        self._add_work(
+            scheduler.Work(
+                f"discovery:{child.id}:{page_number}",
+                discover,
+                depth=depth,
+            )
+        )
+
+    def _store_page(
+        self,
+        child: discovery.Child,
+        page: discovery.ActivityPage,
+        depth: int,
+    ) -> None:
+        for activity in page.activities:
+            if not self.included(activity, self.bounds):
+                continue
+            self.activities.append((child, activity))
+            self.engine.store.upsert_activity(activity)
+            for medium in activity.media:
+                self.associations.append((activity.id, medium.id))
+                self._schedule_medium(child, activity, medium, depth)
+
+    def _schedule_medium(
+        self,
+        child: discovery.Child,
+        activity: discovery.Activity,
+        medium: discovery.MediaReference,
+        depth: int,
+    ) -> None:
+        if medium.id in self.media_ids:
+            return
+        self.media_ids.add(medium.id)
+        if self.media_pending:
+            self.engine.reporter.extend(progress.Stage.MEDIA, 1)
+        else:
+            self.engine.reporter.start(progress.Stage.MEDIA, 1)
+        self.media_pending += 1
+
+        async def download() -> None:
+            await self.download_media(child, activity, medium)
+            self.engine.reporter.advance(progress.Stage.MEDIA)
+            self.media_pending -= 1
+
+        self._add_work(
+            scheduler.Work(
+                f"media:{medium.id}",
+                download,
+                media=True,
+                depth=depth + 1,
+            )
+        )
+
+    def _report_page(self, page: discovery.ActivityPage) -> None:
+        if not self.counted and page.next_cursor is not None:
+            self.engine.reporter.extend(progress.Stage.DISCOVERY, 1)
+        self.engine.reporter.advance(progress.Stage.DISCOVERY)
+
+    def _depth(self, effective_from: dt.date | None) -> int:
+        adapter = self.engine.adapter
+        if not isinstance(adapter, CountedActivityAdapter):
+            return 1
+        return adapter.activity_page_count(
+            from_date=effective_from,
+            through_date=self.bounds.through_date,
+        )
+
+    def _add_work(self, work: scheduler.Work) -> None:
+        self.graph.add(attrs.evolve(work, order=self.order))
+        self.order += 1
 
 
 def parse_date(value: str) -> dt.date:
