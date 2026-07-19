@@ -2,6 +2,7 @@
 
 import datetime as dt
 import json
+import math
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
@@ -146,92 +147,72 @@ class ArchiveVerifier:
         media_id = str(row["id"])
         issues: list[VerificationIssue] = []
         media_path = self._contained(str(row["relative_path"]))
-        sidecar_path = self._contained(str(row["sidecar_path"]))
         if media_path is None:
             issues.append(
                 VerificationIssue(media_id, "media path escapes archive root")
             )
         elif not media_path.is_file():
             issues.append(VerificationIssue(media_id, "media file is missing"))
-        if sidecar_path is None:
-            issues.append(
-                VerificationIssue(media_id, "sidecar path escapes archive root")
-            )
-        elif not sidecar_path.is_file():
-            issues.append(VerificationIssue(media_id, "sidecar file is missing"))
-        if (
-            media_path is None
-            or sidecar_path is None
-            or not media_path.is_file()
-            or not sidecar_path.is_file()
-        ):
+        sidecar_value = row["conflict_sidecar_path"]
+        if sidecar_value is not None:
+            issues.extend(self._verify_sidecar(media_id, str(sidecar_value)))
+        if media_path is None or not media_path.is_file():
             return tuple(issues)
-        try:
-            document = json.loads(sidecar_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            issues.append(
-                VerificationIssue(media_id, "sidecar is not valid UTF-8 JSON")
-            )
-            return tuple(issues)
-        if not isinstance(document, dict):
-            issues.append(
-                VerificationIssue(media_id, "sidecar must contain a JSON object")
-            )
-            return tuple(issues)
-        issues.extend(self._verify_document(row, media_path, document))
-        return tuple(issues)
-
-    def _verify_document(
-        self,
-        row: sqlite3.Row,
-        media_path: Path,
-        document: Mapping[str, Any],
-    ) -> tuple[VerificationIssue, ...]:
-        media_id = str(row["id"])
-        issues: list[VerificationIssue] = []
-        version = document.get("version")
-        if (
-            not isinstance(version, int)
-            or isinstance(version, bool)
-            or not archive.MIN_SIDECAR_VERSION <= version <= archive.SIDECAR_VERSION
-        ):
-            issues.append(VerificationIssue(media_id, "unsupported sidecar version"))
-        source = document.get("source")
-        if not isinstance(source, dict) or source.get("media_id") != media_id:
-            issues.append(
-                VerificationIssue(media_id, "sidecar media ID does not match index")
-            )
-        hashes = document.get("hashes")
         final_hash = archive.sha256(media_path)
         if final_hash != row["final_sha256"]:
             issues.append(
                 VerificationIssue(media_id, "media SHA-256 does not match index")
             )
-        if not isinstance(hashes, dict) or hashes.get("final_sha256") != final_hash:
+        try:
+            embedded = json.loads(str(row["embedded_fields_json"]))
+        except json.JSONDecodeError:
             issues.append(
-                VerificationIssue(media_id, "media SHA-256 does not match sidecar")
+                VerificationIssue(media_id, "embedded metadata index is not valid JSON")
             )
-        elif hashes.get("source_sha256") != row["source_sha256"]:
+            return tuple(issues)
+        if not isinstance(embedded, dict):
             issues.append(
-                VerificationIssue(media_id, "source SHA-256 does not match index")
+                VerificationIssue(media_id, "embedded metadata index must be an object")
             )
-        issues.extend(self._verify_embedded(media_id, media_path, document))
+            return tuple(issues)
+        issues.extend(self._verify_embedded(media_id, media_path, embedded))
         return tuple(issues)
+
+    def _verify_sidecar(
+        self,
+        media_id: str,
+        relative: str,
+    ) -> tuple[VerificationIssue, ...]:
+        sidecar_path = self._contained(relative)
+        if sidecar_path is None:
+            return (VerificationIssue(media_id, "sidecar path escapes archive root"),)
+        if not sidecar_path.is_file():
+            return (VerificationIssue(media_id, "sidecar file is missing"),)
+        try:
+            document = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return (
+                VerificationIssue(media_id, "sidecar is not valid UTF-8 JSON"),
+            )
+        if not isinstance(document, dict):
+            return (
+                VerificationIssue(media_id, "sidecar must contain a JSON object"),
+            )
+        if metadata.portable_original(document) != document:
+            return (
+                VerificationIssue(
+                    media_id,
+                    "sidecar contains host filesystem metadata",
+                ),
+            )
+        return ()
 
     def _verify_embedded(
         self,
         media_id: str,
         media_path: Path,
-        document: Mapping[str, Any],
+        embedded: Mapping[str, Any],
     ) -> tuple[VerificationIssue, ...]:
-        metadata_document = document.get("metadata")
-        embedded = (
-            metadata_document.get("embedded_fields", {})
-            if isinstance(metadata_document, dict)
-            else {}
-        )
-        if not isinstance(embedded, dict):
-            return (VerificationIssue(media_id, "embedded_fields must be an object"),)
         if media_path.suffix.casefold() not in _EMBEDDABLE_SUFFIXES:
             return ()
         try:
@@ -263,6 +244,15 @@ class ArchiveVerifier:
             return expected_datetime is not None and any(
                 ArchiveVerifier._parse_datetime(value) == expected_datetime
                 for value in values
+            )
+        try:
+            expected_number = float(str(expected))
+            actual_numbers = tuple(float(str(value)) for value in values)
+        except ValueError:
+            pass
+        else:
+            return math.isfinite(expected_number) and any(
+                math.isclose(value, expected_number) for value in actual_numbers
             )
         return str(expected) in {str(value) for value in values}
 

@@ -204,7 +204,15 @@ def test_parallel_sidecars_and_layout_migration(
         store.upsert_child(child)
         store.upsert_activity(activity)
         old_media = store.store_media(
-            archive.StoredMedia(medium, activity, child, first_source, "source", {})
+            archive.StoredMedia(
+                medium,
+                activity,
+                child,
+                first_source,
+                "source",
+                {},
+                sidecar_metadata={"EXIF:Make": "Camera"},
+            )
         )
         old_sidecar = old_media.with_suffix(old_media.suffix + ".json")
 
@@ -215,10 +223,18 @@ def test_parallel_sidecars_and_layout_migration(
     second_source.write_bytes(b"second")
     with archive.Archive(root, parallel) as store:
         new_media = store.store_media(
-            archive.StoredMedia(medium, activity, child, second_source, "source", {})
+            archive.StoredMedia(
+                medium,
+                activity,
+                child,
+                second_source,
+                "source",
+                {},
+                sidecar_metadata={"EXIF:Make": "Camera"},
+            )
         )
         row = store.connection.execute("SELECT * FROM media").fetchone()
-    new_sidecar = root / row["sidecar_path"]
+    new_sidecar = root / row["conflict_sidecar_path"]
     assert new_media == root / "media/20260701_093000_01.jpg"
     assert new_sidecar == root / "sidecars/20260701_093000_01.jpg.json"
     assert new_media.read_bytes() == b"second"
@@ -302,6 +318,50 @@ def test_migrates_version_one_archive(tmp_path: Path) -> None:
             for row in store.connection.execute("PRAGMA table_info(activities)")
         }
     assert "details_json" in columns
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            '{"metadata":{"embedded_fields":{"XMP:Source":"Kindertales"}}}',
+            {"XMP:Source": "Kindertales"},
+        ),
+        ("not-json", {}),
+        ('{"metadata":[]}', {}),
+        ('{"metadata":{"embedded_fields":[]}}', {}),
+    ],
+)
+def test_migrates_and_removes_manifest_sidecars(
+    tmp_path: Path,
+    payload: str,
+    expected: dict[str, str],
+) -> None:
+    """Schema-3 manifests become indexed fields and are then removed."""
+    sidecar = tmp_path / "media.json"
+    sidecar.write_text(payload, encoding="utf-8")
+    connection = sqlite3.connect(tmp_path / "index.sqlite3")
+    connection.executescript(
+        """
+        CREATE TABLE media (
+            id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE,
+            sidecar_path TEXT NOT NULL UNIQUE, content_type TEXT,
+            source_url TEXT NOT NULL, source_sha256 TEXT NOT NULL,
+            final_sha256 TEXT NOT NULL, inferred_time INTEGER NOT NULL,
+            inferred_gps INTEGER NOT NULL, available INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO media VALUES (
+            'media', 'media.bin', 'media.json', NULL, '', '', '', 0, 0, 1
+        );
+        PRAGMA user_version = 3;
+        """
+    )
+    connection.close()
+    with archive.Archive(tmp_path) as store:
+        row = store.connection.execute("SELECT * FROM media").fetchone()
+    assert json.loads(row["embedded_fields_json"]) == expected
+    assert row["conflict_sidecar_path"] is None
+    assert not sidecar.exists()
 
 
 def test_store_structured_child_and_account_records(tmp_path: Path) -> None:
@@ -401,15 +461,15 @@ def test_reject_newer_schema(tmp_path: Path) -> None:
 def test_in_memory_archive_does_not_create_files(tmp_path: Path) -> None:
     """Dry-run storage provides the schema without touching its working directory."""
     with archive.Archive.memory() as store:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 4
     assert not tuple(tmp_path.iterdir())
 
 
-def test_store_media_and_sidecar(
+def test_store_media_and_conflict_sidecar(
     tmp_path: Path,
     entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
 ) -> None:
-    """Media, authoritative sidecar, and database hashes commit together."""
+    """A conflict sidecar contains only portable original metadata."""
     child, activity, medium = entities
     source = tmp_path / "download.tmp"
     source.write_bytes(b"enriched media")
@@ -433,6 +493,7 @@ def test_store_media_and_sidecar(
                 {"XMP:Description": "Caption"},
                 inferred_time=True,
                 inferred_gps=True,
+                sidecar_metadata={"EXIF:Make": "Camera"},
                 http_properties={"content_type": "image/jpeg"},
             )
         )
@@ -442,18 +503,20 @@ def test_store_media_and_sidecar(
     sidecar = json.loads(
         destination.with_suffix(".jpg.json").read_text(encoding="utf-8")
     )
-    assert sidecar["version"] == archive.SIDECAR_VERSION
-    assert sidecar["source"]["url"].endswith("token=REDACTED")
-    assert sidecar["metadata"]["original_exiftool"] == {"EXIF:Make": "Camera"}
-    assert sidecar["activity"]["details"] == {}
-    assert sidecar["media"]["caption"] is None
+    assert sidecar == {"EXIF:Make": "Camera"}
+    assert json.loads(row["embedded_fields_json"]) == {
+        "XMP:Description": "Caption"
+    }
+    assert row["conflict_sidecar_path"].endswith(".jpg.json")
     assert row["source_sha256"] == source_hash == row["final_sha256"]
     assert link["activity_id"] == activity.id
 
 
+@pytest.mark.parametrize("with_sidecar", [False, True])
 def test_store_media_cleans_temporary_sidecar_on_failure(
     tmp_path: Path,
     entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+    with_sidecar: bool,
 ) -> None:
     """A database failure does not leave a partial sidecar."""
     child, activity, medium = entities
@@ -465,10 +528,37 @@ def test_store_media_cleans_temporary_sidecar_on_failure(
     ):
         store.store_media(
             archive.StoredMedia(
-                medium, activity, child, source, archive.sha256(source), {}
+                medium,
+                activity,
+                child,
+                source,
+                archive.sha256(source),
+                {},
+                sidecar_metadata={"EXIF:Make": "Camera"} if with_sidecar else {},
             )
         )
     assert not tuple((tmp_path / "archive").rglob("*.tmp"))
+
+
+def test_store_media_without_conflict_has_no_sidecar(
+    tmp_path: Path,
+    entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+) -> None:
+    """Ordinary enrichment does not create a metadata sidecar."""
+    child, activity, medium = entities
+    source = tmp_path / "source"
+    source.write_bytes(b"data")
+    with archive.Archive(tmp_path / "archive") as store:
+        store.upsert_child(child)
+        store.upsert_activity(activity)
+        destination = store.store_media(
+            archive.StoredMedia(
+                medium, activity, child, source, archive.sha256(source), {}
+            )
+        )
+        row = store.connection.execute("SELECT * FROM media").fetchone()
+    assert row["conflict_sidecar_path"] is None
+    assert not destination.with_suffix(destination.suffix + ".json").exists()
 
 
 def test_sync_state_and_availability(

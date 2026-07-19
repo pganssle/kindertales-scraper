@@ -309,10 +309,8 @@ async def test_sync_downloads_deduplicates_and_archives(
     assert run["status"] == "complete"
     assert media_row["source_sha256"] == hashlib.sha256(b"source").hexdigest()
     assert media_row["source_sha256"] != media_row["final_sha256"]
-    sidecar = json.loads(
-        (settings(tmp_path).archive_directory / media_row["sidecar_path"]).read_text()
-    )
-    assert sidecar["metadata"]["inferred_time"] is True
+    assert media_row["conflict_sidecar_path"] is None
+    assert json.loads(media_row["embedded_fields_json"]) == {"embedded": "yes"}
     assert reporter.events == [
         ("start", progress.Stage.DISCOVERY, 1),
         ("advance", progress.Stage.DISCOVERY, 1),

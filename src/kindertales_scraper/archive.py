@@ -14,9 +14,7 @@ import attrs
 
 from . import config, discovery, redaction
 
-SCHEMA_VERSION = 3
-MIN_SIDECAR_VERSION = 1
-SIDECAR_VERSION = 3
+SCHEMA_VERSION = 4
 RECORD_VERSION = 1
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -32,28 +30,6 @@ def sha256(path: Path) -> str:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-_HOST_METADATA_NAMES = frozenset(
-    {
-        "Directory",
-        "FileAccessDate",
-        "FileInodeChangeDate",
-        "FileModifyDate",
-        "FileName",
-        "FilePermissions",
-        "SourceFile",
-    }
-)
-
-
-def _portable_original_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove ExifTool values derived from the local temporary source path."""
-    return {
-        key: value
-        for key, value in metadata.items()
-        if key.rsplit(":", 1)[-1] not in _HOST_METADATA_NAMES
-    }
 
 
 def safe_component(value: str) -> str:
@@ -169,6 +145,7 @@ class StoredMedia:
     embedded_fields: Mapping[str, Any] = attrs.field(factory=dict)
     inferred_time: bool = False
     inferred_gps: bool = False
+    sidecar_metadata: Mapping[str, Any] = attrs.field(factory=dict)
     http_properties: Mapping[str, Any] = attrs.field(factory=dict)
 
 
@@ -217,7 +194,7 @@ class Archive:
 
     def _initialize(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, SCHEMA_VERSION}:
             msg = f"unsupported archive schema version: {version}"
             raise ArchiveError(msg)
         self.connection.executescript(
@@ -237,7 +214,9 @@ class Archive:
                 sidecar_path TEXT NOT NULL UNIQUE, content_type TEXT,
                 source_url TEXT NOT NULL, source_sha256 TEXT NOT NULL,
                 final_sha256 TEXT NOT NULL, inferred_time INTEGER NOT NULL,
-                inferred_gps INTEGER NOT NULL, available INTEGER NOT NULL DEFAULT 1
+                inferred_gps INTEGER NOT NULL, available INTEGER NOT NULL DEFAULT 1,
+                embedded_fields_json TEXT NOT NULL DEFAULT '{}',
+                conflict_sidecar_path TEXT
             );
             CREATE TABLE IF NOT EXISTS activity_media (
                 activity_id TEXT NOT NULL REFERENCES activities(id),
@@ -262,8 +241,48 @@ class Archive:
                 "ALTER TABLE activities ADD COLUMN details_json "
                 "TEXT NOT NULL DEFAULT '{}'"
             )
+        media_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(media)").fetchall()
+        }
+        if "embedded_fields_json" not in media_columns:
+            self.connection.execute(
+                "ALTER TABLE media ADD COLUMN embedded_fields_json "
+                "TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "conflict_sidecar_path" not in media_columns:
+            self.connection.execute(
+                "ALTER TABLE media ADD COLUMN conflict_sidecar_path TEXT"
+            )
+        if version in {1, 2, 3}:
+            self._remove_legacy_sidecars()
         self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.connection.commit()
+
+    def _remove_legacy_sidecars(self) -> None:
+        """Migrate embedded-field data and remove obsolete manifest sidecars."""
+        for row in self.connection.execute(
+            "SELECT id, sidecar_path FROM media"
+        ).fetchall():
+            path = self.root / str(row["sidecar_path"])
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+                embedded: Mapping[str, Any] = {}
+            else:
+                metadata_document = document.get("metadata", {})
+                embedded = (
+                    metadata_document.get("embedded_fields", {})
+                    if isinstance(metadata_document, dict)
+                    else {}
+                )
+                if not isinstance(embedded, dict):
+                    embedded = {}
+            self.connection.execute(
+                "UPDATE media SET embedded_fields_json=? WHERE id=?",
+                (json.dumps(embedded, sort_keys=True), row["id"]),
+            )
+            path.unlink(missing_ok=True)
 
     def store_record(
         self,
@@ -366,37 +385,43 @@ class Archive:
         self.connection.commit()
 
     def store_media(self, record: StoredMedia) -> Path:
-        """Atomically place enriched media, its sidecar, and its index record."""
+        """Atomically place enriched media and any original-conflict sidecar."""
         previous = self.connection.execute(
-            "SELECT relative_path, sidecar_path FROM media WHERE id=?",
+            "SELECT relative_path, conflict_sidecar_path FROM media WHERE id=?",
             (record.medium.id,),
         ).fetchone()
         relative, sidecar_relative = self._allocate_paths(record)
         destination = self.root / relative
         sidecar = self.root / sidecar_relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        temporary_sidecar = sidecar.with_suffix(sidecar.suffix + ".tmp")
+        conflict_sidecar = sidecar_relative if record.sidecar_metadata else None
+        temporary_sidecar: Path | None = None
+        if conflict_sidecar is not None:
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            temporary_sidecar = sidecar.with_suffix(sidecar.suffix + ".tmp")
+            temporary_sidecar.write_text(
+                json.dumps(record.sidecar_metadata, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
         final_hash = sha256(record.temporary_path)
-        document = self._sidecar(record, relative, final_hash)
-        temporary_sidecar.write_text(
-            json.dumps(document, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
         try:
             with self.connection:
                 self.connection.execute(
                     """INSERT INTO media
                     (id, relative_path, sidecar_path, content_type, source_url,
-                    source_sha256, final_sha256, inferred_time, inferred_gps)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_sha256, final_sha256, inferred_time, inferred_gps,
+                    embedded_fields_json, conflict_sidecar_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET relative_path=excluded.relative_path,
                     sidecar_path=excluded.sidecar_path,
                     content_type=excluded.content_type, source_url=excluded.source_url,
                     source_sha256=excluded.source_sha256,
                     final_sha256=excluded.final_sha256,
                     inferred_time=excluded.inferred_time,
-                    inferred_gps=excluded.inferred_gps, available=1""",
+                    inferred_gps=excluded.inferred_gps,
+                    embedded_fields_json=excluded.embedded_fields_json,
+                    conflict_sidecar_path=excluded.conflict_sidecar_path,
+                    available=1""",
                     (
                         record.medium.id,
                         relative.as_posix(),
@@ -407,6 +432,10 @@ class Archive:
                         final_hash,
                         record.inferred_time,
                         record.inferred_gps,
+                        json.dumps(record.embedded_fields, sort_keys=True),
+                        conflict_sidecar.as_posix()
+                        if conflict_sidecar is not None
+                        else None,
                     ),
                 )
                 self.connection.execute(
@@ -414,16 +443,20 @@ class Archive:
                     (record.activity.id, record.medium.id),
                 )
                 record.temporary_path.replace(destination)
-                temporary_sidecar.replace(sidecar)
+                if temporary_sidecar is not None:
+                    temporary_sidecar.replace(sidecar)
         except Exception:
-            temporary_sidecar.unlink(missing_ok=True)
+            if temporary_sidecar is not None:
+                temporary_sidecar.unlink(missing_ok=True)
             raise
         if previous is not None:
             self._remove_previous(
                 Path(str(previous["relative_path"])),
-                Path(str(previous["sidecar_path"])),
+                Path(str(previous["conflict_sidecar_path"]))
+                if previous["conflict_sidecar_path"] is not None
+                else None,
                 relative,
-                sidecar_relative,
+                conflict_sidecar,
             )
         return destination
 
@@ -474,14 +507,16 @@ class Archive:
     def _remove_previous(
         self,
         previous_media: Path,
-        previous_sidecar: Path,
+        previous_sidecar: Path | None,
         media: Path,
-        sidecar: Path,
+        sidecar: Path | None,
     ) -> None:
         for previous, current in (
             (previous_media, media),
             (previous_sidecar, sidecar),
         ):
+            if previous is None:
+                continue
             if previous == current:
                 continue
             path = self.root / previous
@@ -494,46 +529,6 @@ class Archive:
                 except OSError:
                     break
                 parent = parent.parent
-
-    def _sidecar(
-        self,
-        record: StoredMedia,
-        relative: Path,
-        final_hash: str,
-    ) -> dict[str, Any]:
-        return {
-            "version": SIDECAR_VERSION,
-            "source": {
-                "service": "Kindertales",
-                "child_id": record.child.id,
-                "activity_id": record.activity.id,
-                "media_id": record.medium.id,
-                "url": redaction.url(record.medium.url),
-            },
-            "activity": {
-                "type": record.activity.kind,
-                "occurred_at": record.activity.occurred_at.isoformat(),
-                "caption": record.activity.caption,
-                "author": record.activity.author,
-                "center_id": record.activity.center_id,
-                "details": dict(record.activity.details),
-            },
-            "media": {"caption": record.medium.caption},
-            "archive_path": relative.as_posix(),
-            "http": dict(record.http_properties),
-            "hashes": {
-                "source_sha256": record.source_sha256,
-                "final_sha256": final_hash,
-            },
-            "metadata": {
-                "original_exiftool": _portable_original_metadata(
-                    record.original_metadata
-                ),
-                "embedded_fields": dict(record.embedded_fields),
-                "inferred_time": record.inferred_time,
-                "inferred_gps": record.inferred_gps,
-            },
-        }
 
     def begin_sync(self) -> str:
         """Record and return a new running sync identifier."""

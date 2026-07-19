@@ -26,6 +26,51 @@ class Enrichment:
     embedded_fields: Mapping[str, str]
     inferred_time: bool
     inferred_gps: bool
+    sidecar_metadata: Mapping[str, Any] = attrs.field(factory=dict)
+
+
+_HOST_METADATA_NAMES = frozenset(
+    {
+        "Directory",
+        "FileAccessDate",
+        "FileInodeChangeDate",
+        "FileModifyDate",
+        "FileName",
+        "FilePermissions",
+        "SourceFile",
+    }
+)
+
+
+def portable_original(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove values derived from the local download path and filesystem."""
+    return {
+        key: value
+        for key, value in metadata.items()
+        if _tag_name(key) not in _HOST_METADATA_NAMES
+    }
+
+
+def _qualified_tag(value: str) -> str:
+    if value.startswith("[") and "]" in value:
+        group, name = value[1:].split("]", 1)
+        return f"{group}:{name}".casefold()
+    return value.casefold()
+
+
+def sidecar_metadata(
+    original: Mapping[str, Any],
+    embedded_fields: Mapping[str, str],
+) -> Mapping[str, Any]:
+    """Return original metadata only when enrichment overwrites a real tag."""
+    targets = {_qualified_tag(name): value for name, value in embedded_fields.items()}
+    conflict = any(
+        (expected := targets.get(_qualified_tag(name))) is not None
+        and str(value) != str(expected)
+        for name, value in original.items()
+        if _tag_name(name) not in _HOST_METADATA_NAMES
+    )
+    return portable_original(original) if conflict else {}
 
 
 def _has(metadata: Mapping[str, Any], names: frozenset[str]) -> bool:
@@ -189,4 +234,10 @@ class ExifTool:
             temporary.unlink(missing_ok=True)
             msg = "ExifTool could not enrich media metadata"
             raise MetadataError(msg) from error
-        return Enrichment(original, fields, inferred_time, inferred_gps)
+        return Enrichment(
+            original,
+            fields,
+            inferred_time,
+            inferred_gps,
+            sidecar_metadata(original, fields),
+        )

@@ -393,16 +393,17 @@ class SyncEngine:
             )
             self.store.store_media(
                 archive.StoredMedia(
-                    medium,
-                    activity,
-                    child,
-                    temporary,
-                    digest.hexdigest(),
-                    enrichment.original,
-                    enrichment.embedded_fields,
-                    enrichment.inferred_time,
-                    enrichment.inferred_gps,
-                    {
+                    medium=medium,
+                    activity=activity,
+                    child=child,
+                    temporary_path=temporary,
+                    source_sha256=digest.hexdigest(),
+                    original_metadata=enrichment.original,
+                    embedded_fields=enrichment.embedded_fields,
+                    inferred_time=enrichment.inferred_time,
+                    inferred_gps=enrichment.inferred_gps,
+                    sidecar_metadata=enrichment.sidecar_metadata,
+                    http_properties={
                         "content_type": content_type,
                         "content_length": response.headers.get("Content-Length"),
                         "etag": response.headers.get("ETag"),

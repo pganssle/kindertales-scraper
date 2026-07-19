@@ -114,6 +114,41 @@ def test_preserves_existing_gps_uncertainty(
 
 
 @pytest.mark.parametrize(
+    ("original", "fields", "expected"),
+    [
+        (
+            {
+                "XMP-dc:Source": "Camera",
+                "EXIF:Make": "Camera Co.",
+                "File:Directory": "/private/tmp",
+                "SourceFile": "/private/tmp/download",
+            },
+            {"XMP-dc:Source": "Kindertales"},
+            {"XMP-dc:Source": "Camera", "EXIF:Make": "Camera Co."},
+        ),
+        (
+            {"XMP-dc:Source": "Kindertales"},
+            {"XMP-dc:Source": "Kindertales"},
+            {},
+        ),
+        (
+            {"[XMP-dc]Source": "Camera"},
+            {"XMP-dc:Source": "Kindertales"},
+            {"[XMP-dc]Source": "Camera"},
+        ),
+        ({"EXIF:Make": "Camera Co."}, {"XMP-dc:Source": "Kindertales"}, {}),
+    ],
+)
+def test_sidecar_contains_original_only_for_overwritten_metadata(
+    original: dict[str, object],
+    fields: dict[str, str],
+    expected: dict[str, object],
+) -> None:
+    """Sidecars are portable original-metadata backups, never manifests."""
+    assert metadata.sidecar_metadata(original, fields) == expected
+
+
+@pytest.mark.parametrize(
     ("center", "fallback", "expected"),
     [(False, True, "1.0"), (False, False, None)],
 )

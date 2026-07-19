@@ -29,8 +29,9 @@ def create_archive(
     tmp_path: Path,
     suffix: str = ".jpg",
     embedded_fields: dict[str, str] | None = None,
+    sidecar_metadata: dict[str, object] | None = None,
 ) -> tuple[Path, Path]:
-    """Create a minimal valid archive and return media and sidecar paths."""
+    """Create a minimal valid archive and return possible media/sidecar paths."""
     child = discovery.Child("child", "Alex")
     medium = discovery.MediaReference(
         "media",
@@ -59,6 +60,7 @@ def create_archive(
                 archive.sha256(source),
                 {},
                 embedded_fields or {"XMP-dc:Source": "Kindertales"},
+                sidecar_metadata=sidecar_metadata or {},
             )
         )
     return media_path, media_path.with_suffix(media_path.suffix + ".json")
@@ -78,7 +80,7 @@ def create_record(tmp_path: Path) -> Path:
 
 
 def test_valid_archive(tmp_path: Path) -> None:
-    """Matching database, files, sidecars, hashes, and metadata are valid."""
+    """Matching database, media hashes, and embedded metadata are valid."""
     media_path, _ = create_archive(tmp_path)
     report = verify.ArchiveVerifier(
         tmp_path / "archive",
@@ -89,13 +91,16 @@ def test_valid_archive(tmp_path: Path) -> None:
     assert media_path.is_file()
 
 
-@pytest.mark.parametrize("version", [1, 2])
-def test_valid_historical_sidecar_version(tmp_path: Path, version: int) -> None:
-    """Verification remains compatible with sidecars written by older releases."""
-    _, sidecar = create_archive(tmp_path, ".bin")
-    document = json.loads(sidecar.read_text(encoding="utf-8"))
-    document["version"] = version
-    sidecar.write_text(json.dumps(document), encoding="utf-8")
+def test_valid_original_conflict_sidecar(tmp_path: Path) -> None:
+    """A portable original-metadata object is a valid exceptional sidecar."""
+    _, sidecar = create_archive(
+        tmp_path,
+        ".bin",
+        sidecar_metadata={"XMP-dc:Source": "Original"},
+    )
+    assert json.loads(sidecar.read_text(encoding="utf-8")) == {
+        "XMP-dc:Source": "Original"
+    }
     assert verify.ArchiveVerifier(tmp_path / "archive").run().valid
 
 
@@ -110,6 +115,19 @@ def test_exif_tag_wins_over_composite_tag_with_same_name(tmp_path: Path) -> None
                 "Composite:GPSLongitude": -71.123,
             }
         ),
+    ).run()
+    assert report.valid
+
+
+def test_numeric_metadata_renderings_are_equivalent(tmp_path: Path) -> None:
+    """ExifTool integer rendering matches an equivalent configured float."""
+    create_archive(
+        tmp_path,
+        embedded_fields={"EXIF:GPSHPositioningError": "1500.0"},
+    )
+    report = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool({"EXIF:GPSHPositioningError": 1500}),
     ).run()
     assert report.valid
 
@@ -218,53 +236,61 @@ def test_invalid_embedded_datetime_differs(tmp_path: Path) -> None:
 )
 def test_missing_files(tmp_path: Path, target: str, message: str) -> None:
     """Missing media and sidecars are reported separately."""
-    media_path, sidecar = create_archive(tmp_path)
+    media_path, sidecar = create_archive(
+        tmp_path,
+        sidecar_metadata={"EXIF:Make": "Camera"},
+    )
     (media_path if target == "media" else sidecar).unlink()
     report = verify.ArchiveVerifier(tmp_path / "archive").run()
-    assert report.issues[0].message == message
+    assert any(issue.message == message for issue in report.issues)
     assert not report.valid
 
 
 @pytest.mark.parametrize("payload", ["not-json", "[]"])
 def test_invalid_sidecar_document(tmp_path: Path, payload: str) -> None:
     """Sidecars must be UTF-8 JSON objects."""
-    _, sidecar = create_archive(tmp_path)
+    _, sidecar = create_archive(
+        tmp_path,
+        sidecar_metadata={"EXIF:Make": "Camera"},
+    )
     sidecar.write_text(payload, encoding="utf-8")
     report = verify.ArchiveVerifier(tmp_path / "archive").run()
-    assert "sidecar" in report.issues[0].message
+    assert any("sidecar" in issue.message for issue in report.issues)
 
 
-@pytest.mark.parametrize("version", [True, 999])
-def test_sidecar_and_hash_mismatches(tmp_path: Path, version: int) -> None:
-    """All sidecar identity and hash invariants are checked."""
-    media_path, sidecar = create_archive(tmp_path, ".bin")
-    document = json.loads(sidecar.read_text())
-    document["version"] = version
-    document["source"]["media_id"] = "wrong"
-    document["hashes"]["source_sha256"] = "wrong"
-    document["hashes"]["final_sha256"] = "wrong"
-    document["metadata"]["embedded_fields"] = []
-    sidecar.write_text(json.dumps(document), encoding="utf-8")
+def test_tampered_media_and_nonportable_sidecar(tmp_path: Path) -> None:
+    """Media changes and host-derived original metadata are both rejected."""
+    media_path, sidecar = create_archive(
+        tmp_path,
+        ".bin",
+        sidecar_metadata={"EXIF:Make": "Camera"},
+    )
+    sidecar.write_text(
+        json.dumps({"SourceFile": "/synthetic/original"}),
+        encoding="utf-8",
+    )
     media_path.write_bytes(b"tampered")
     report = verify.ArchiveVerifier(tmp_path / "archive").run()
     messages = {issue.message for issue in report.issues}
-    assert "unsupported sidecar version" in messages
-    assert "sidecar media ID does not match index" in messages
     assert "media SHA-256 does not match index" in messages
-    assert "media SHA-256 does not match sidecar" in messages
-    assert "embedded_fields must be an object" in messages
+    assert "sidecar contains host filesystem metadata" in messages
 
 
-def test_source_hash_mismatch_and_unsupported_container(tmp_path: Path) -> None:
-    """Source hashes are checked while unsupported containers trust their sidecar."""
-    _, sidecar = create_archive(tmp_path, ".bin")
-    document = json.loads(sidecar.read_text())
-    document["hashes"]["source_sha256"] = "wrong"
-    sidecar.write_text(json.dumps(document), encoding="utf-8")
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [("not-json", "not valid JSON"), ("[]", "must be an object")],
+)
+def test_invalid_embedded_metadata_index(
+    tmp_path: Path,
+    value: str,
+    message: str,
+) -> None:
+    """Malformed indexed enrichment fields are reported."""
+    create_archive(tmp_path, ".bin")
+    with sqlite3.connect(tmp_path / "archive/index.sqlite3") as connection:
+        connection.execute("UPDATE media SET embedded_fields_json=?", (value,))
     report = verify.ArchiveVerifier(tmp_path / "archive").run()
-    assert report.issues == (
-        verify.VerificationIssue("media", "source SHA-256 does not match index"),
-    )
+    assert message in report.issues[0].message
 
 
 @pytest.mark.parametrize(
@@ -372,12 +398,13 @@ def test_sqlite_database_error(
 
 def test_escaping_paths_and_orphan_links(tmp_path: Path) -> None:
     """Traversal paths and relationship orphans are reported."""
-    create_archive(tmp_path)
+    create_archive(tmp_path, sidecar_metadata={"EXIF:Make": "Camera"})
     database = tmp_path / "archive" / "index.sqlite3"
     connection = sqlite3.connect(database)
     connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute(
-        "UPDATE media SET relative_path='../outside', sidecar_path='../outside'"
+        "UPDATE media SET relative_path='../outside', "
+        "conflict_sidecar_path='../outside'"
     )
     connection.execute("INSERT INTO activity_media VALUES ('missing', 'media')")
     connection.commit()

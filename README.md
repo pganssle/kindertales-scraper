@@ -78,9 +78,12 @@ Archive names default to
 authentic capture metadata and falls back to the activity time; `sequence` is
 the one-based collision number. `folder_format = "{child_name}"` creates a
 stable child directory; `folder_frequency` then appends `none`, daily, monthly,
-or yearly calendar grouping beneath it. Set `sidecar_layout = "parallel"` to
-mirror the media tree under a sibling `sidecars` directory instead of placing
-JSON beside each media file. Folder and filename templates may use `timestamp`,
+or yearly calendar grouping beneath it. Metadata sidecars are exceptional: one
+is written only when enrichment would overwrite meaningful original metadata.
+It contains only the portable pre-edit ExifTool metadata. Set
+`sidecar_layout = "parallel"` to mirror those exceptional files under a sibling
+`sidecars` directory instead of placing them beside media. Folder and filename
+templates may use `timestamp`,
 `sequence`, `extension`, `child_name`, `child_id`, `activity_type`,
 `activity_id`, `media_id`, `original_name`, and `original_stem`.
 
@@ -107,13 +110,12 @@ overlap. Archived files are never deleted.
 ## Archive and privacy
 
 `index.sqlite3` uses a versioned schema with `children`, `activities`, `media`,
-`activity_media`, and `sync_runs` tables. Each enriched file has a versioned JSON
-sidecar containing the source hash, final hash, redacted source URL, portable
-pre-edit ExifTool output, scraped context (including structured daily-report
-details and that medium's caption), HTTP properties, and inference flags.
-Host-derived ExifTool fields such as `SourceFile`, `File:Directory`, local file
-timestamps, and permissions are intentionally omitted.
-Sidecars are authoritative where a container cannot embed a field.
+`activity_media`, and `sync_runs` tables. It retains source/final hashes,
+redacted source URLs, scraped context, and the metadata fields selected for
+embedding. A sidecar is created only to back up meaningful original metadata
+that ExifTool will replace; it contains the original portable ExifTool object
+and none of the scraper's metadata. Host-derived fields such as `SourceFile`,
+`File:Directory`, local file timestamps, and permissions are omitted.
 
 The archive contains sensitive information about children. It intentionally uses
 ordinary destination filesystem permissions so it remains portable; securing

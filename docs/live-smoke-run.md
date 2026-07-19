@@ -26,6 +26,8 @@ application:
 - source URLs, diagnostics, and sidecars contain no cookies, authorization
   values, bearer tokens, or signed query values;
 - source and final hashes verify, and authentic capture/GPS fields are unchanged;
+- media without overwritten original metadata have no sidecar; any conflict
+  sidecar contains only portable original ExifTool metadata;
 - missing time/GPS values use activity and center context with inference flags;
 - inferred GPS contains the configured horizontal positioning error;
 - a dry run creates neither the archive directory nor an empty SQLite database;
