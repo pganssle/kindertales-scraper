@@ -12,12 +12,17 @@ class FakeBar:
     def __init__(self) -> None:
         self.updates = 0
         self.closed = False
+        self.total: float | None = 0
+        self.refreshes = 0
 
     def update(self, amount: int = 1) -> None:
         self.updates += amount
 
     def close(self) -> None:
         self.closed = True
+
+    def refresh(self) -> None:
+        self.refreshes += 1
 
 
 def test_terminal_reporter_renders_progress() -> None:
@@ -27,6 +32,7 @@ def test_terminal_reporter_renders_progress() -> None:
     reporter.start(progress.Stage.DISCOVERY, 1)
     reporter.advance(progress.Stage.DISCOVERY)
     reporter.close()
+    progress.NullReporter().extend(progress.Stage.DISCOVERY, 1)
     output = stream.getvalue()
     assert progress.Stage.DISCOVERY.description in output
     assert progress.Stage.DISCOVERY.unit == "page"
@@ -46,14 +52,19 @@ def test_restarting_and_closing_terminal_bars() -> None:
     ) -> FakeBar:
         assert disable is None
         bar = FakeBar()
+        bar.total = float(_total)
         bars.append(bar)
         return bar
 
     reporter = progress.TerminalReporter(bar_factory=factory)
     reporter.start(progress.Stage.MEDIA, 2)
     reporter.advance(progress.Stage.MEDIA)
+    reporter.extend(progress.Stage.MEDIA, 2)
+    reporter.extend(progress.Stage.MEDIA, 0)
     reporter.start(progress.Stage.MEDIA, 1)
     reporter.start(progress.Stage.DISCOVERY, 1)
     reporter.close()
     assert bars[0].updates == 1
+    assert bars[0].total == 4
+    assert bars[0].refreshes == 1
     assert all(bar.closed for bar in bars)

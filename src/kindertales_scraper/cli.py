@@ -83,7 +83,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if report.valid:
             print(  # noqa: T201
                 f"verified {report.checked_media} media files and "
-                f"{report.checked_records} records"
+                f"{report.checked_records} records and "
+                f"{report.checked_documents} documents"
             )
         return 0 if report.valid else 1
     return 0

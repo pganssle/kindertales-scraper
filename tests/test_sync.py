@@ -81,8 +81,12 @@ class FakeRecordAdapter(FakeAdapter):
         *,
         from_date: dt.date | None = None,
         through_date: dt.date | None = None,
+        request_complete: Callable[[], None] | None = None,
     ) -> tuple[discovery.Record, ...]:
         self.bounds.append((from_date, through_date))
+        if request_complete is not None:
+            for _ in range(6):
+                request_complete()
         return (self._record("profile", child_id),)
 
     async def account_records(
@@ -90,8 +94,14 @@ class FakeRecordAdapter(FakeAdapter):
         *,
         messages: bool,
         billing: bool,
+        request_complete: Callable[[], None] | None = None,
+        requests_discovered: Callable[[int], None] | None = None,
     ) -> tuple[discovery.Record, ...]:
+        del requests_discovered
         self.account_options.append((messages, billing))
+        if request_complete is not None:
+            for _ in range((5 if messages else 0) + (1 if billing else 0)):
+                request_complete()
         return tuple(
             self._record(category)
             for category, enabled in (("messages", messages), ("billing", billing))
@@ -148,6 +158,40 @@ class CountedFakeAdapter(FakeAdapter):
             yield activity
 
 
+class FakeDocumentAdapter(FakeRecordAdapter):
+    """Expose one child profile record with a standalone attachment."""
+
+    async def child_records(
+        self,
+        child_id: str,
+        *,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
+        request_complete: Callable[[], None] | None = None,
+    ) -> tuple[discovery.Record, ...]:
+        self.bounds.append((from_date, through_date))
+        if request_complete is not None:
+            for _ in range(6):
+                request_complete()
+        document = discovery.DocumentReference(
+            "document",
+            "https://files.example.test/immunization.pdf?token=secret",
+            "immunization.pdf",
+            "application/pdf",
+        )
+        return (
+            discovery.Record(
+                "profile",
+                "profile_documents",
+                "https://example.test/profile",
+                dt.datetime(2026, 7, 18, tzinfo=dt.UTC),
+                {"documents": ({"id": document.id},)},
+                child_id,
+                documents=(document,),
+            ),
+        )
+
+
 class FakeEnricher:
     """Enrich media deterministically without an ExifTool installation."""
 
@@ -178,6 +222,9 @@ class RecordingReporter:
 
     def advance(self, stage: progress.Stage) -> None:
         self.events.append(("advance", stage, 1))
+
+    def extend(self, stage: progress.Stage, amount: int) -> None:
+        self.events.append(("extend", stage, amount))
 
     def close(self) -> None:
         self.events.append(("close",))
@@ -250,6 +297,65 @@ async def test_sync_archives_enabled_records(
     assert len(rows) == 3
     assert adapter.account_options == [(True, True)]
     assert all("REDACTED" in row["source_url"] for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_sync_downloads_standalone_record_documents(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """Discovered profile attachments are streamed, indexed, and verified."""
+    child, _activities = records
+    adapter = FakeDocumentAdapter((child,), ())
+    reporter = RecordingReporter()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"document",
+            headers={"Content-Type": "application/pdf"},
+        )
+
+    async for runner, store in engine(
+        tmp_path,
+        adapter,
+        httpx.MockTransport(handler),
+        reporter,
+    ):
+        summary = await runner.run(
+            sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 1))
+        )
+        row = store.connection.execute("SELECT * FROM documents").fetchone()
+        link = store.connection.execute("SELECT * FROM record_documents").fetchone()
+    assert summary.records == 1
+    assert row["sha256"] == hashlib.sha256(b"document").hexdigest()
+    assert link["document_id"] == "document"
+    assert ("start", progress.Stage.DOCUMENTS, 1) in reporter.events
+    assert ("advance", progress.Stage.DOCUMENTS, 1) in reporter.events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", [None, "text/html"])
+async def test_sync_rejects_non_document_responses(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+    content_type: str | None,
+) -> None:
+    """Missing and HTML attachment responses cannot enter the archive."""
+    child, _activities = records
+    adapter = FakeDocumentAdapter((child,), ())
+    headers = {"Content-Type": content_type} if content_type is not None else {}
+    async for runner, _store in engine(
+        tmp_path,
+        adapter,
+        httpx.MockTransport(
+            lambda _request: httpx.Response(200, content=b"bad", headers=headers)
+        ),
+    ):
+        with pytest.raises(ExceptionGroup, match="document downloads failed"):
+            await runner.run(
+                sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 1))
+            )
 
 
 @pytest.mark.asyncio

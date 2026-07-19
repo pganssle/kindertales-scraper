@@ -13,6 +13,7 @@ class Stage(enum.Enum):
 
     DISCOVERY = ("Discovering activities", "page")
     RECORDS = ("Discovering records", "page")
+    DOCUMENTS = ("Archiving documents", "file")
     MEDIA = ("Archiving media", "file")
 
     @property
@@ -37,6 +38,20 @@ class Bar(Protocol):
         """Finish rendering the bar."""
         ...
 
+    @property
+    def total(self) -> float | None:
+        """Return the current expected total."""
+        ...
+
+    @total.setter
+    def total(self, value: float | None) -> None:
+        """Set the current expected total."""
+        ...
+
+    def refresh(self) -> object:
+        """Refresh the rendered total."""
+        ...
+
 
 class Reporter(Protocol):
     """Progress events emitted by the synchronization engine."""
@@ -47,6 +62,10 @@ class Reporter(Protocol):
 
     def advance(self, stage: Stage) -> None:
         """Record one completed item in a stage."""
+        ...
+
+    def extend(self, stage: Stage, amount: int) -> None:
+        """Add newly discovered work to an active stage."""
         ...
 
     def close(self) -> None:
@@ -63,6 +82,9 @@ class NullReporter:
 
     def advance(self, _stage: Stage) -> None:
         """Discard an item completion."""
+
+    def extend(self, _stage: Stage, _amount: int) -> None:
+        """Discard newly discovered work."""
 
     def close(self) -> None:
         """Discard closure."""
@@ -133,6 +155,15 @@ class TerminalReporter:
         if self._remaining[stage] <= 0:
             self._bars.pop(stage).close()
             del self._remaining[stage]
+
+    def extend(self, stage: Stage, amount: int) -> None:
+        """Increase an active bar's total for newly discovered work."""
+        if amount <= 0:
+            return
+        bar = self._bars[stage]
+        bar.total = (bar.total or 0) + amount
+        self._remaining[stage] += amount
+        bar.refresh()
 
     def close(self) -> None:
         """Close every bar, including partially completed stages."""

@@ -157,7 +157,7 @@ def test_configure_centers_honors_manual_name_exit(
     [
         (
             verify.VerificationReport(2, (), 3),
-            (0, "verified 2 media files and 3 records\n"),
+            (0, "verified 2 media files and 3 records and 0 documents\n"),
         ),
         (
             verify.VerificationReport(

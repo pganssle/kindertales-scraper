@@ -79,6 +79,42 @@ def create_record(tmp_path: Path) -> Path:
         return store.store_record(record)
 
 
+def create_document(tmp_path: Path) -> Path:
+    """Add one valid standalone document and return its archive path."""
+    child = discovery.Child("child", "Alex")
+    document = discovery.DocumentReference(
+        "document",
+        "https://example.test/document.pdf",
+        "document.pdf",
+        "application/pdf",
+    )
+    record = discovery.Record(
+        "profile",
+        "profile_documents",
+        "https://example.test/profile",
+        dt.datetime(2026, 7, 18, tzinfo=dt.UTC),
+        {"documents": ({"id": document.id},)},
+        child.id,
+        documents=(document,),
+    )
+    source = tmp_path / "document.tmp"
+    source.write_bytes(b"document")
+    digest = archive.sha256(source)
+    with archive.Archive(tmp_path / "archive") as store:
+        store.upsert_child(child)
+        store.store_record(record, child)
+        return store.store_document(
+            archive.StoredDocument(
+                document,
+                record,
+                child,
+                source,
+                digest,
+                "application/pdf",
+            )
+        )
+
+
 def test_valid_archive(tmp_path: Path) -> None:
     """Matching database, media hashes, and embedded metadata are valid."""
     media_path, _ = create_archive(tmp_path)
@@ -89,6 +125,51 @@ def test_valid_archive(tmp_path: Path) -> None:
     assert report == verify.VerificationReport(1, ())
     assert report.valid
     assert media_path.is_file()
+
+
+def test_valid_standalone_document(tmp_path: Path) -> None:
+    """Indexed standalone document files and hashes participate in verification."""
+    create_archive(tmp_path)
+    document = create_document(tmp_path)
+    report = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool({"XMP-dc:Source": "Kindertales"}),
+    ).run()
+    assert report.valid
+    assert report.checked_documents == 1
+    assert document.is_file()
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("missing", "document file is missing"),
+        ("hash", "document SHA-256 does not match index"),
+        ("escape", "document path escapes archive root"),
+    ],
+)
+def test_invalid_standalone_document(
+    tmp_path: Path,
+    failure: str,
+    message: str,
+) -> None:
+    """Missing, changed, and escaping document paths are reported."""
+    create_archive(tmp_path)
+    document = create_document(tmp_path)
+    if failure == "missing":
+        document.unlink()
+    elif failure == "hash":
+        document.write_bytes(b"changed")
+    else:
+        with sqlite3.connect(tmp_path / "archive/index.sqlite3") as connection:
+            connection.execute(
+                "UPDATE documents SET relative_path='../outside' WHERE id='document'"
+            )
+    report = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool({"XMP-dc:Source": "Kindertales"}),
+    ).run()
+    assert any(issue.message == message for issue in report.issues)
 
 
 def test_valid_original_conflict_sidecar(tmp_path: Path) -> None:
@@ -407,6 +488,7 @@ def test_escaping_paths_and_orphan_links(tmp_path: Path) -> None:
         "conflict_sidecar_path='../outside'"
     )
     connection.execute("INSERT INTO activity_media VALUES ('missing', 'media')")
+    connection.execute("INSERT INTO record_documents VALUES ('missing', 'missing')")
     connection.commit()
     connection.close()
     report = verify.ArchiveVerifier(tmp_path / "archive").run()
@@ -414,3 +496,4 @@ def test_escaping_paths_and_orphan_links(tmp_path: Path) -> None:
     assert "media path escapes archive root" in messages
     assert "sidecar path escapes archive root" in messages
     assert "1 orphan activity-media links" in messages
+    assert "1 orphan record-document links" in messages

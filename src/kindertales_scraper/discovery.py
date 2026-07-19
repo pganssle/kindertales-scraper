@@ -8,7 +8,7 @@ import re
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import attrs
@@ -65,6 +65,17 @@ class ActivityPage:
 
 
 @attrs.frozen
+class DocumentReference:
+    """A standalone document attached to a Kindertales record."""
+
+    id: str
+    url: str
+    filename: str
+    content_type: str | None = None
+    description: str | None = None
+
+
+@attrs.frozen
 class Record:
     """A read-only snapshot of a non-media Kindertales record area."""
 
@@ -75,6 +86,7 @@ class Record:
     details: Mapping[str, Any]
     child_id: str | None = None
     title: str | None = None
+    documents: tuple[DocumentReference, ...] = ()
 
 
 def _required_string(item: Mapping[str, Any], key: str) -> str:
@@ -805,6 +817,85 @@ def _form_entries(raw_form: object) -> tuple[Mapping[str, Any], ...]:
     return tuple(entries)
 
 
+@attrs.define
+class _EnrollmentBaseParser(html.parser.HTMLParser):
+    pickups: list[dict[str, str]] = attrs.field(factory=list, init=False)
+    _stack: list[tuple[str, frozenset[str]]] = attrs.field(factory=list, init=False)
+    _pickup_candidate: bool = attrs.field(default=False, init=False)
+    _pickup_active: bool = attrs.field(default=False, init=False)
+    _current_label: str | None = attrs.field(default=None, init=False)
+    _current_pickup: dict[str, str] = attrs.field(factory=dict, init=False)
+
+    def __attrs_post_init__(self) -> None:
+        html.parser.HTMLParser.__init__(self)
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs_list: list[tuple[str, str | None]],
+    ) -> None:
+        classes = _classes(dict(attrs_list))
+        if tag == "div" and "title2" in classes:
+            self._finish_pickup()
+            self._pickup_active = False
+            self._pickup_candidate = "pickup" in classes
+        if tag not in {"br", "hr", "img", "input", "link", "meta"}:
+            self._stack.append((tag, classes))
+
+    def handle_startendtag(
+        self,
+        _tag: str,
+        _attrs_list: list[tuple[str, str | None]],
+    ) -> None:
+        """Ignore self-closing elements without changing the class stack."""
+
+    def handle_data(self, data: str) -> None:
+        value = " ".join(data.split())
+        if not value:
+            return
+        if self._pickup_candidate and value.casefold() == "authorized pickups details":
+            self._pickup_active = True
+            self._pickup_candidate = False
+            return
+        if not self._pickup_active:
+            return
+        active_classes = frozenset().union(
+            *(classes for _tag, classes in self._stack)
+        )
+        if "title3" in active_classes:
+            self._current_label = value.rstrip(":").casefold().replace(" ", "_")
+        elif "text1" in active_classes and self._current_label is not None:
+            label = self._current_label
+            if label == "name" and self._current_pickup:
+                self._finish_pickup()
+                self._current_label = label
+            self._current_pickup[label] = value
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == tag:
+                del self._stack[index:]
+                return
+
+    def close(self) -> None:
+        super().close()
+        self._finish_pickup()
+
+    def _finish_pickup(self) -> None:
+        if self._current_pickup:
+            self.pickups.append(self._current_pickup)
+        self._current_pickup = {}
+        self._current_label = None
+
+
+def parse_authorized_pickups(document: str) -> tuple[Mapping[str, str], ...]:
+    """Extract populated authorized-pickup rows from the base enrollment form."""
+    parser = _EnrollmentBaseParser()
+    parser.feed(document)
+    parser.close()
+    return tuple(parser.pickups)
+
+
 def parse_enrollment_forms(
     payload: Mapping[str, Any],
     child_id: str,
@@ -818,9 +909,12 @@ def parse_enrollment_forms(
     default_forms: tuple[tuple[object, object], ...] = (
         tuple(raw_defaults.items()) if isinstance(raw_defaults, dict) else ()
     )
+    authorized_pickups: tuple[Mapping[str, str], ...] = ()
     for form_id, form in default_forms:
         if not isinstance(form, dict):
             continue
+        if isinstance(form.get("html"), str):
+            authorized_pickups = parse_authorized_pickups(form["html"])
         entries = _form_entries(form.get("form"))
         if entries:
             forms.append({"kind": "default", "id": str(form_id), "entries": entries})
@@ -839,9 +933,285 @@ def parse_enrollment_forms(
         "enrollment",
         source_url,
         observed_at,
-        {"forms": tuple(forms)},
+        {
+            "authorized_pickups": authorized_pickups,
+            "forms": tuple(forms),
+        },
         child_id,
         "Enrollment",
+    )
+
+
+_DOCUMENT_SUFFIXES = frozenset(
+    {
+        ".csv",
+        ".doc",
+        ".docx",
+        ".gif",
+        ".heic",
+        ".jpeg",
+        ".jpg",
+        ".ods",
+        ".odt",
+        ".pdf",
+        ".png",
+        ".rtf",
+        ".tif",
+        ".tiff",
+        ".txt",
+        ".xls",
+        ".xlsx",
+    }
+)
+
+
+def _document_reference(
+    href: str,
+    *,
+    base_url: str,
+    description: str | None = None,
+) -> DocumentReference | None:
+    absolute = urljoin(base_url, href)
+    split_url = urlsplit(absolute)
+    filename = PurePosixPath(unquote(split_url.path)).name
+    suffix = PurePosixPath(filename).suffix.casefold()
+    query = parse_qs(split_url.query)
+    if suffix not in _DOCUMENT_SUFFIXES and "X-Amz-Signature" not in query:
+        return None
+    content_types = query.get("response-content-type", ())
+    return DocumentReference(
+        _stable_id("document", split_url.netloc, split_url.path),
+        absolute,
+        filename or "document.bin",
+        content_types[0] if content_types else None,
+        description,
+    )
+
+
+@attrs.define
+class _ProfileDocumentParser(html.parser.HTMLParser):
+    base_url: str
+    documents: list[DocumentReference] = attrs.field(factory=list, init=False)
+    _table_depth: int = attrs.field(default=0, init=False)
+    _row_depth: int = attrs.field(default=0, init=False)
+    _row_text: list[str] = attrs.field(factory=list, init=False)
+
+    def __attrs_post_init__(self) -> None:
+        html.parser.HTMLParser.__init__(self)
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs_list: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs_list)
+        if tag == "table" and attributes.get("id") == "attachments_table":
+            self._table_depth = 1
+            return
+        if not self._table_depth:
+            return
+        if tag == "table":
+            self._table_depth += 1
+        if tag == "tr":
+            self._row_depth += 1
+            if self._row_depth == 1:
+                self._row_text = []
+        if tag == "a" and (href := attributes.get("href")):
+            document = _document_reference(
+                href,
+                base_url=self.base_url,
+                description=" | ".join(self._row_text) or None,
+            )
+            if document is not None:
+                self.documents.append(document)
+
+    def handle_data(self, data: str) -> None:
+        if self._row_depth and (value := " ".join(data.split())):
+            self._row_text.append(value)
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._table_depth:
+            return
+        if tag == "tr" and self._row_depth:
+            self._row_depth -= 1
+        if tag == "table":
+            self._table_depth -= 1
+
+
+def parse_profile_documents(
+    document: str,
+    *,
+    child_id: str,
+    source_url: str,
+    observed_at: dt.datetime,
+) -> Record:
+    """Extract attached child documents from the profile attachment table."""
+    parser = _ProfileDocumentParser(source_url)
+    parser.feed(document)
+    documents = tuple(dict.fromkeys(parser.documents))
+    return Record(
+        _stable_id("profile_documents", child_id, source_url),
+        "profile_documents",
+        source_url,
+        observed_at,
+        {
+            "documents": tuple(
+                {
+                    "id": item.id,
+                    "filename": item.filename,
+                    "content_type": item.content_type,
+                    "description": item.description,
+                }
+                for item in documents
+            )
+        },
+        child_id,
+        "Profile Documents",
+        documents,
+    )
+
+
+@attrs.frozen
+class MessageLink:
+    """One message-detail link and its listing state."""
+
+    id: str
+    href: str
+    unread: bool
+
+
+@attrs.define
+class _MessageListingParser(html.parser.HTMLParser):
+    links: list[MessageLink] = attrs.field(factory=list, init=False)
+    pages: list[str] = attrs.field(factory=list, init=False)
+    _unread_depth: int = attrs.field(default=0, init=False)
+    _depth: int = attrs.field(default=0, init=False)
+
+    def __attrs_post_init__(self) -> None:
+        html.parser.HTMLParser.__init__(self)
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs_list: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs_list)
+        self._depth += 1
+        if tag == "li" and "unread" in _classes(attributes):
+            self._unread_depth = self._depth
+        if tag != "a" or not (href := attributes.get("href")):
+            return
+        query = parse_qs(urlsplit(href).query)
+        if message_ids := query.get("msgid"):
+            self.links.append(
+                MessageLink(message_ids[0], href, bool(self._unread_depth))
+            )
+        elif query.get("page") and query.get("pg") == ["messagecentre"]:
+            self.pages.append(href)
+
+    def handle_endtag(self, _tag: str) -> None:
+        if self._unread_depth == self._depth:
+            self._unread_depth = 0
+        if self._depth:
+            self._depth -= 1
+
+
+def parse_message_listing(
+    document: str,
+) -> tuple[tuple[MessageLink, ...], tuple[str, ...]]:
+    """Return message-detail and pagination links from one folder page."""
+    parser = _MessageListingParser()
+    parser.feed(document)
+    links = tuple({link.id: link for link in parser.links}.values())
+    return links, tuple(dict.fromkeys(parser.pages))
+
+
+@attrs.define
+class _MessageDetailParser(html.parser.HTMLParser):
+    base_url: str
+    subject: list[str] = attrs.field(factory=list, init=False)
+    headers: list[str] = attrs.field(factory=list, init=False)
+    body: list[str] = attrs.field(factory=list, init=False)
+    documents: list[DocumentReference] = attrs.field(factory=list, init=False)
+    _depth: int = attrs.field(default=0, init=False)
+    _subject_depth: int = attrs.field(default=0, init=False)
+    _headers_depth: int = attrs.field(default=0, init=False)
+    _body_depth: int = attrs.field(default=0, init=False)
+    _ignored_depth: int = attrs.field(default=0, init=False)
+
+    def __attrs_post_init__(self) -> None:
+        html.parser.HTMLParser.__init__(self)
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs_list: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs_list)
+        self._depth += 1
+        if tag in {"script", "style"}:
+            self._ignored_depth = self._depth
+        classes = _classes(attributes)
+        if "subject" in classes:
+            self._subject_depth = self._depth
+        if "printHead" in classes:
+            self._headers_depth = self._depth
+        if attributes.get("id") == "viewer-content":
+            self._body_depth = self._depth
+        if tag == "a" and (href := attributes.get("href")):
+            document = _document_reference(href, base_url=self.base_url)
+            if document is not None:
+                self.documents.append(document)
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
+        value = " ".join(data.split())
+        if not value:
+            return
+        if self._body_depth:
+            self.body.append(value)
+        elif self._subject_depth:
+            self.subject.append(value)
+        elif self._headers_depth:
+            self.headers.append(value)
+
+    def handle_endtag(self, _tag: str) -> None:
+        if self._body_depth == self._depth:
+            self._body_depth = 0
+        if self._subject_depth == self._depth:
+            self._subject_depth = 0
+        if self._headers_depth == self._depth:
+            self._headers_depth = 0
+        if self._ignored_depth == self._depth:
+            self._ignored_depth = 0
+        if self._depth:
+            self._depth -= 1
+
+
+def parse_message_detail(
+    document: str,
+    link: MessageLink,
+    *,
+    source_url: str,
+) -> tuple[Mapping[str, Any], tuple[DocumentReference, ...]]:
+    """Extract one message body, headers, state, and attachments."""
+    parser = _MessageDetailParser(source_url)
+    parser.feed(document)
+    documents = tuple(dict.fromkeys(parser.documents))
+    return (
+        {
+            "id": link.id,
+            "unread": link.unread,
+            "subject": " ".join(parser.subject) or None,
+            "headers": tuple(parser.headers),
+            "body": "\n".join(parser.body),
+            "documents": tuple(
+                {"id": item.id, "filename": item.filename}
+                for item in documents
+            ),
+        },
+        documents,
     )
 
 
@@ -1076,6 +1446,7 @@ class LegacyKindertalesAdapter:
         *,
         from_date: dt.date | None = None,
         through_date: dt.date | None = None,
+        request_complete: Callable[[], None] | None = None,
     ) -> tuple[Record, ...]:
         """Snapshot the read-only report and profile areas for one child."""
         if from_date is None:
@@ -1108,6 +1479,8 @@ class LegacyKindertalesAdapter:
             "/db/allActiveForms.php",
             data={"cid": child_id},
         )
+        if request_complete is not None:
+            request_complete()
         enrollment_response.raise_for_status()
         try:
             enrollment_payload = enrollment_response.json()
@@ -1137,16 +1510,28 @@ class LegacyKindertalesAdapter:
             if subpage is not None:
                 params["subpg"] = subpage
             response = await self.get("/index.php", params=params)
+            if request_complete is not None:
+                request_complete()
             response.raise_for_status()
-            records.append(
-                parse_record_page(
-                    response.text,
-                    category=category,
-                    source_url=str(response.url),
-                    observed_at=observed_at,
-                    child_id=child_id,
+            if category == "profile_documents":
+                records.append(
+                    parse_profile_documents(
+                        response.text,
+                        child_id=child_id,
+                        source_url=str(response.url),
+                        observed_at=observed_at,
+                    )
                 )
-            )
+            else:
+                records.append(
+                    parse_record_page(
+                        response.text,
+                        category=category,
+                        source_url=str(response.url),
+                        observed_at=observed_at,
+                        child_id=child_id,
+                    )
+                )
         return tuple(records)
 
     async def account_records(
@@ -1154,34 +1539,112 @@ class LegacyKindertalesAdapter:
         *,
         messages: bool,
         billing: bool,
+        request_complete: Callable[[], None] | None = None,
+        requests_discovered: Callable[[int], None] | None = None,
     ) -> tuple[Record, ...]:
         """Snapshot enabled account-level communications and financial pages."""
-        routes: list[tuple[str, str, str | None]] = []
-        if messages:
-            routes.extend(
-                (f"messages_{subpage}", "messagecentre", subpage)
-                for subpage in ("inbox", "sent", "draft", "scheduled", "contacts")
-            )
-        if billing:
-            routes.append(("billing", "pbilling", None))
         records = []
-        for category, page, subpage in routes:
-            params = {"pg": page}
-            if subpage is not None:
-                params["subpg"] = subpage
-            response = await self.get("/index.php", params=params)
+        if messages:
+            for subpage in ("inbox", "sent", "draft", "scheduled"):
+                record = await self._message_folder(
+                    subpage,
+                    request_complete=request_complete,
+                    requests_discovered=requests_discovered,
+                )
+                if record is not None:
+                    records.append(record)
+            response = await self.get(
+                "/index.php",
+                params={"pg": "messagecentre", "subpg": "contacts"},
+            )
+            if request_complete is not None:
+                request_complete()
+            if not _dashboard_redirect(response):
+                response.raise_for_status()
+                records.append(
+                    parse_record_page(
+                        response.text,
+                        category="messages_contacts",
+                        source_url=str(response.url),
+                        observed_at=dt.datetime.now(dt.UTC),
+                    )
+                )
+        if billing:
+            response = await self.get("/index.php", params={"pg": "pbilling"})
+            if request_complete is not None:
+                request_complete()
             if _dashboard_redirect(response):
-                continue
+                return tuple(records)
             response.raise_for_status()
             records.append(
                 parse_record_page(
                     response.text,
-                    category=category,
+                    category="billing",
                     source_url=str(response.url),
                     observed_at=dt.datetime.now(dt.UTC),
                 )
             )
         return tuple(records)
+
+    async def _message_folder(
+        self,
+        subpage: str,
+        *,
+        request_complete: Callable[[], None] | None,
+        requests_discovered: Callable[[int], None] | None,
+    ) -> Record | None:
+        listing_url = f"/index.php?pg=messagecentre&subpg={subpage}"
+        pending = [listing_url]
+        known_pages = {listing_url}
+        links: dict[str, MessageLink] = {}
+        source_url = str(self.client.base_url.join(listing_url))
+        while pending:
+            page_url = pending.pop(0)
+            response = await self.get(page_url)
+            if request_complete is not None:
+                request_complete()
+            if _dashboard_redirect(response):
+                return None
+            response.raise_for_status()
+            source_url = str(response.url)
+            page_links, page_urls = parse_message_listing(response.text)
+            links.update({link.id: link for link in page_links})
+            new_pages = tuple(
+                _legacy_request_target(href)
+                for href in page_urls
+                if parse_qs(urlsplit(href).query).get("subpg") == [subpage]
+                and _legacy_request_target(href) not in known_pages
+            )
+            known_pages.update(new_pages)
+            pending.extend(new_pages)
+            if requests_discovered is not None:
+                requests_discovered(len(new_pages))
+        messages = []
+        documents: dict[str, DocumentReference] = {}
+        if requests_discovered is not None:
+            requests_discovered(len(links))
+        for link in links.values():
+            response = await self.get(_legacy_request_target(link.href))
+            if request_complete is not None:
+                request_complete()
+            response.raise_for_status()
+            message, attached = parse_message_detail(
+                response.text,
+                link,
+                source_url=str(response.url),
+            )
+            messages.append(message)
+            documents.update({item.id: item for item in attached})
+        observed_at = dt.datetime.now(dt.UTC)
+        return Record(
+            _stable_id(f"messages_{subpage}", source_url),
+            f"messages_{subpage}",
+            source_url,
+            observed_at,
+            {"messages": tuple(messages)},
+            title=f"Messages: {subpage.title()}",
+            documents=tuple(documents.values()),
+        )
 
 
 def _dashboard_redirect(response: httpx.Response) -> bool:
@@ -1189,6 +1652,15 @@ def _dashboard_redirect(response: httpx.Response) -> bool:
         return False
     location = response.headers.get("Location", "")
     return parse_qs(urlsplit(location).query).get("pg") == ["dashboard"]
+
+
+def _legacy_request_target(href: str) -> str:
+    """Return an authenticated relative target for a same-site legacy link."""
+    split_url = urlsplit(href)
+    path = split_url.path or "/index.php"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{path}?{split_url.query}" if split_url.query else path
 
 
 @attrs.frozen

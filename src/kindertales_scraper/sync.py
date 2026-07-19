@@ -71,6 +71,7 @@ class RecordAdapter(Protocol):
         *,
         from_date: dt.date | None = None,
         through_date: dt.date | None = None,
+        request_complete: Callable[[], None] | None = None,
     ) -> tuple[discovery.Record, ...]:
         """Return record-area snapshots for one child."""
         ...
@@ -80,6 +81,8 @@ class RecordAdapter(Protocol):
         *,
         messages: bool,
         billing: bool,
+        request_complete: Callable[[], None] | None = None,
+        requests_discovered: Callable[[int], None] | None = None,
     ) -> tuple[discovery.Record, ...]:
         """Return enabled account-level record snapshots."""
         ...
@@ -208,6 +211,7 @@ class SyncEngine:
                 self.store.upsert_child(child)
             for record_child, record in records:
                 self.store.store_record(record, record_child)
+            await self._archive_documents(records)
             await self._archive_activities(activities)
             cursor_updates = self._cursor_updates(activities, cursors)
             self.store.mark_unavailable(
@@ -301,6 +305,9 @@ class SyncEngine:
                         child.id,
                         from_date=bounds.from_date,
                         through_date=bounds.through_date,
+                        request_complete=lambda: self.reporter.advance(
+                            progress.Stage.RECORDS
+                        ),
                     )
                 )
         if self.settings.exports.messages or self.settings.exports.billing:
@@ -309,6 +316,13 @@ class SyncEngine:
                 for record in await self.adapter.account_records(
                     messages=self.settings.exports.messages,
                     billing=self.settings.exports.billing,
+                    request_complete=lambda: self.reporter.advance(
+                        progress.Stage.RECORDS
+                    ),
+                    requests_discovered=lambda amount: self.reporter.extend(
+                        progress.Stage.RECORDS,
+                        amount,
+                    ),
                 )
             )
         return records
@@ -321,15 +335,12 @@ class SyncEngine:
         requests = self._record_request_count(children)
         if requests:
             self.reporter.start(progress.Stage.RECORDS, requests)
-        records = await self._discover_records(children, bounds)
-        for _ in range(requests):
-            self.reporter.advance(progress.Stage.RECORDS)
-        return records
+        return await self._discover_records(children, bounds)
 
     def _record_request_count(self, children: Sequence[discovery.Child]) -> int:
         if not isinstance(self.adapter, RecordAdapter):
             return 0
-        child_pages = 7 * len(children) if self.settings.exports.child_records else 0
+        child_pages = 6 * len(children) if self.settings.exports.child_records else 0
         message_pages = 5 if self.settings.exports.messages else 0
         billing_pages = 1 if self.settings.exports.billing else 0
         return child_pages + message_pages + billing_pages
@@ -414,6 +425,115 @@ class SyncEngine:
             raise ExceptionGroup(msg, failures)
         for activity_id, media_id in associations:
             self.store.link_media(activity_id, media_id)
+
+    async def _archive_documents(
+        self,
+        records: Sequence[tuple[discovery.Child | None, discovery.Record]],
+    ) -> None:
+        first_documents: dict[
+            str,
+            tuple[
+                discovery.Child | None,
+                discovery.Record,
+                discovery.DocumentReference,
+            ],
+        ] = {}
+        associations: list[tuple[str, str]] = []
+        for child, record in records:
+            for document in record.documents:
+                associations.append((record.id, document.id))
+                first_documents.setdefault(document.id, (child, record, document))
+        if not first_documents:
+            return
+        graph = scheduler.DAGScheduler(
+            self.settings.request_policy.max_in_flight,
+            self.settings.request_policy.max_media_downloads,
+        )
+        self.reporter.start(progress.Stage.DOCUMENTS, len(first_documents))
+        for order, (document_id, (child, record, document)) in enumerate(
+            first_documents.items()
+        ):
+
+            async def download(
+                selected_child: discovery.Child | None = child,
+                selected_record: discovery.Record = record,
+                selected_document: discovery.DocumentReference = document,
+            ) -> None:
+                await self._download_document(
+                    selected_child,
+                    selected_record,
+                    selected_document,
+                )
+                self.reporter.advance(progress.Stage.DOCUMENTS)
+
+            graph.add(
+                scheduler.Work(
+                    f"document:{document_id}",
+                    download,
+                    media=True,
+                    depth=1,
+                    order=order,
+                )
+            )
+        results = await graph.run()
+        failures = tuple(
+            result.error
+            for result in results.values()
+            if isinstance(result.error, Exception)
+        )
+        if failures:
+            msg = "one or more document downloads failed"
+            raise ExceptionGroup(msg, failures)
+        for record_id, document_id in associations:
+            self.store.link_document(record_id, document_id)
+
+    async def _download_document(
+        self,
+        child: discovery.Child | None,
+        record: discovery.Record,
+        document: discovery.DocumentReference,
+    ) -> None:
+        request = self.client.build_request("GET", document.url)
+
+        async def send() -> httpx.Response:
+            return await self.client.send(request, stream=True)
+
+        response = await self.requester.request(send, media=True)
+        temporary: Path | None = None
+        try:
+            response.raise_for_status()
+            content_type = (
+                response.headers.get("Content-Type", "").split(";", 1)[0].strip()
+            )
+            if not content_type or content_type.casefold() == "text/html":
+                received = content_type or "missing"
+                msg = f"refusing unexpected document content type: {received}"
+                raise SyncError(msg)
+            temporary_directory = self.store.root / ".tmp"
+            temporary_directory.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                dir=temporary_directory,
+                delete=False,
+            ) as stream:
+                temporary = Path(stream.name)
+                digest = hashlib.sha256()
+                async for chunk in response.aiter_bytes():
+                    stream.write(chunk)
+                    digest.update(chunk)
+            self.store.store_document(
+                archive.StoredDocument(
+                    document,
+                    record,
+                    child,
+                    temporary,
+                    digest.hexdigest(),
+                    content_type,
+                )
+            )
+        finally:
+            await response.aclose()
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     async def _download(
         self,

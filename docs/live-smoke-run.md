@@ -30,6 +30,10 @@ application:
   sidecar contains only portable original ExifTool metadata;
 - missing time/GPS values use activity and center context with inference flags;
 - inferred GPS contains the configured horizontal positioning error;
+- authorized pickups, message bodies, unread state, and profile document links
+  match the corresponding application views;
+- standalone record documents are downloaded unchanged and their indexed hashes
+  verify;
 - a dry run creates neither the archive directory nor an empty SQLite database;
 - enabled child, message, and billing snapshots are counted and verified;
 - an optional record area that redirects to the dashboard is skipped while

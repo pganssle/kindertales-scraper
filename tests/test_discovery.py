@@ -574,6 +574,7 @@ def test_enrollment_forms_contain_only_completed_values() -> None:
         observed_at=dt.datetime(2026, 7, 19, tzinfo=dt.UTC),
     )
     assert record.details == {
+        "authorized_pickups": (),
         "forms": (
             {
                 "kind": "default",
@@ -601,7 +602,105 @@ def test_enrollment_forms_contain_only_completed_values() -> None:
         source_url="https://example.test/forms",
         observed_at=dt.datetime(2026, 7, 19, tzinfo=dt.UTC),
     )
-    assert empty.details == {"forms": ()}
+    assert empty.details == {"authorized_pickups": (), "forms": ()}
+
+
+def test_enrollment_extracts_only_populated_authorized_pickups() -> None:
+    """The base enrollment fragment retains labeled authorized pickup rows."""
+    document = """
+    </unknown><div><span></div><br><br/>
+    <div class="title2 pickup"><small>Authorized Pickups Details</small></div>
+    <div class="text1">Unlabeled value</div>
+    <div><div class="title3">Name:</div><div class="text1">Alex Adult</div>
+    <div class="title3">Phone:</div><div class="text1">555-0100</div>
+    <div class="title3">Relationship:</div><div class="text1">Friend</div></div>
+    <div><div class="title3">Name:</div><div class="text1">Second Adult</div>
+    <div class="title3">Relationship:</div><div class="text1">Neighbor</div></div>
+    <div><div class="title3">Name:</div><div class="text1"></div></div>
+    <div class="title2 pickup"><small>Signature</small></div>
+    <div><div class="title3">Name:</div><div class="text1">Not a pickup</div></div>
+    """
+    assert discovery.parse_authorized_pickups(document) == (
+        {"name": "Alex Adult", "phone": "555-0100", "relationship": "Friend"},
+        {"name": "Second Adult", "relationship": "Neighbor"},
+    )
+    record = discovery.parse_enrollment_forms(
+        {
+            "defaultForms": {"1": {"html": document}},
+            "customForms": [],
+        },
+        "child",
+        source_url="https://example.test/forms",
+        observed_at=dt.datetime(2026, 7, 19, tzinfo=dt.UTC),
+    )
+    assert record.details["authorized_pickups"] == (
+        {"name": "Alex Adult", "phone": "555-0100", "relationship": "Friend"},
+        {"name": "Second Adult", "relationship": "Neighbor"},
+    )
+
+
+def test_profile_documents_extract_signed_attachments() -> None:
+    """Profile attachment rows become typed standalone document references."""
+    signed = (
+        "https://files.example.test/forms/record.pdf?X-Amz-Signature=s&"
+        "response-content-type=application%2Fpdf"
+    )
+    record = discovery.parse_profile_documents(
+        f"""
+        <table id="attachments_table">
+          <tr><th>Title</th><th>File</th></tr>
+          <tr><td>Immunization record</td><td>
+            <a href="{signed}">Open</a>
+          </td></tr>
+          <tr><td><a href="/index.php?pg=profile">Not a document</a></td></tr>
+          <tr><td><table><tr><td>Nested</td></tr></table></td></tr>
+        </table>
+        """,
+        child_id="child",
+        source_url="https://app.example.test/index.php?pg=profiledetails",
+        observed_at=dt.datetime(2026, 7, 19, tzinfo=dt.UTC),
+    )
+    assert len(record.documents) == 1
+    assert record.documents[0].filename == "record.pdf"
+    assert record.documents[0].content_type == "application/pdf"
+    assert record.details["documents"][0]["filename"] == "record.pdf"
+
+
+def test_message_listing_and_detail_are_structured() -> None:
+    """Message state, bodies, pagination, and attachments survive extraction."""
+    links, pages = discovery.parse_message_listing(
+        '<ul><li class="unread"><a href="index.php?pg=messagecentre&amp;'
+        'subpg=inbox&amp;msgid=1">One</a></li>'
+        '<li><a href="index.php?pg=messagecentre&amp;subpg=inbox&amp;msgid=2">'
+        "Two</a></li></ul>"
+        '<a href="index.php?pg=messagecentre&amp;subpg=inbox&amp;page=2">'
+        "Next</a>"
+        '<a href="/unrelated">Other</a></p>'
+    )
+    assert [(link.id, link.unread) for link in links] == [("1", True), ("2", False)]
+    assert len(pages) == 1
+    message, documents = discovery.parse_message_detail(
+        """
+        <div>Outside message</div>
+        <div class="subject">A subject</div>
+        <div class="printHead"><div>From: Sender</div><div>Date: Today</div></div>
+        <div id="viewer-content"><p>First paragraph.</p><script>secret()</script>
+        <p>Second paragraph.</p>
+        <a href="/not-a-document">Ordinary link</a>
+        <a href="/attachment.docx">Attachment</a></div>
+        </unmatched>
+        """,
+        links[0],
+        source_url="https://example.test/index.php?msgid=1",
+    )
+    assert message["unread"] is True
+    assert message["subject"] == "A subject"
+    assert message["body"] == (
+        "First paragraph.\nSecond paragraph.\nOrdinary link\nAttachment"
+    )
+    assert message["headers"] == ("From: Sender", "Date: Today")
+    assert len(documents) == 1
+    assert documents[0].filename == "attachment.docx"
 
 
 @pytest.mark.asyncio
@@ -701,7 +800,14 @@ async def test_legacy_adapter_snapshots_child_record_routes() -> None:
     async with httpx.AsyncClient(
         base_url="https://example.test", transport=httpx.MockTransport(handler)
     ) as client:
+        completed: list[None] = []
         records = await discovery.LegacyKindertalesAdapter(client).child_records(
+            "child-1",
+            from_date=dt.date(2026, 7, 14),
+            through_date=dt.date(2026, 7, 16),
+            request_complete=lambda: completed.append(None),
+        )
+        await discovery.LegacyKindertalesAdapter(client).child_records(
             "child-1",
             from_date=dt.date(2026, 7, 14),
             through_date=dt.date(2026, 7, 16),
@@ -718,6 +824,7 @@ async def test_legacy_adapter_snapshots_child_record_routes() -> None:
     assert requests[1].content == b"cid=child-1"
     assert requests[2].url.params["subpg"] == "child"
     assert "subpg" not in requests[3].url.params
+    assert len(completed) == 6
 
 
 @pytest.mark.asyncio
@@ -787,7 +894,12 @@ async def test_legacy_adapter_snapshots_enabled_account_routes() -> None:
     ) as client:
         adapter = discovery.LegacyKindertalesAdapter(client)
         assert await adapter.account_records(messages=False, billing=False) == ()
-        records = await adapter.account_records(messages=True, billing=True)
+        completed: list[None] = []
+        records = await adapter.account_records(
+            messages=True,
+            billing=True,
+            request_complete=lambda: completed.append(None),
+        )
     assert [record.category for record in records] == [
         "messages_inbox",
         "messages_sent",
@@ -798,6 +910,101 @@ async def test_legacy_adapter_snapshots_enabled_account_routes() -> None:
     assert requests[0].url.params["subpg"] == "inbox"
     assert requests[4].url.params["subpg"] == "contacts"
     assert "subpg" not in requests[5].url.params
+    assert len(completed) == 6
+
+
+@pytest.mark.asyncio
+async def test_account_records_follow_message_details() -> None:
+    """Enabled message exports contain individual bodies and unread state."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("msgid") == "42":
+            return httpx.Response(
+                200,
+                text=(
+                    '<div class="subject">Reminder</div>'
+                    '<div id="viewer-content">Message body</div>'
+                ),
+            )
+        if request.url.params.get("subpg") == "inbox":
+            pagination = (
+                '<a href="http://example.test/index.php?pg=messagecentre&amp;'
+                'subpg=inbox&amp;page=2">'
+                "Next</a>"
+                if request.url.params.get("page") is None
+                else '<a href="http://example.test/index.php?pg=messagecentre&amp;'
+                'subpg=inbox&amp;page=2">'
+                "Same page</a>"
+            )
+            return httpx.Response(
+                200,
+                text=(
+                    '<li class="unread"><a href="index.php?pg=messagecentre&amp;'
+                    'subpg=inbox&amp;msgid=42">Reminder</a></li>'
+                    + pagination
+                ),
+            )
+        return httpx.Response(200, text="")
+
+    async with httpx.AsyncClient(
+        base_url="https://example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        completed: list[None] = []
+        discovered: list[int] = []
+        records = await discovery.LegacyKindertalesAdapter(client).account_records(
+            messages=True,
+            billing=False,
+            request_complete=lambda: completed.append(None),
+            requests_discovered=discovered.append,
+        )
+        await discovery.LegacyKindertalesAdapter(client).account_records(
+            messages=True,
+            billing=False,
+        )
+    inbox = next(record for record in records if record.category == "messages_inbox")
+    assert inbox.details["messages"] == (
+        {
+            "id": "42",
+            "unread": True,
+            "subject": "Reminder",
+            "headers": (),
+            "body": "Message body",
+            "documents": (),
+        },
+    )
+    assert len(completed) == 7
+    assert sum(discovered) == 2
+
+
+@pytest.mark.asyncio
+async def test_unavailable_contacts_and_billing_are_skipped() -> None:
+    """Dashboard redirects omit unavailable optional account areas."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("subpg") == "contacts" or request.url.params.get(
+            "pg"
+        ) == "pbilling":
+            return httpx.Response(
+                302,
+                headers={"Location": "index.php?pg=dashboard"},
+            )
+        return httpx.Response(200, text="")
+
+    async with httpx.AsyncClient(
+        base_url="https://example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        records = await discovery.LegacyKindertalesAdapter(client).account_records(
+            messages=True,
+            billing=True,
+        )
+    assert [record.category for record in records] == [
+        "messages_inbox",
+        "messages_sent",
+        "messages_draft",
+        "messages_scheduled",
+    ]
 
 
 @pytest.mark.asyncio

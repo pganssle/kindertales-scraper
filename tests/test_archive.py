@@ -427,6 +427,105 @@ def test_new_record_source_replaces_same_child_category(tmp_path: Path) -> None:
     assert json.loads(path.read_text(encoding="utf-8"))["details"] == {"events": []}
 
 
+def test_store_standalone_record_documents(tmp_path: Path) -> None:
+    """Record attachments are hashed, indexed, linked, and named safely."""
+    child = discovery.Child("child", "A Child")
+    first = discovery.DocumentReference(
+        "document-1",
+        "https://files.example.test/report.pdf?X-Amz-Signature=secret",
+        "../report.pdf",
+        "application/pdf",
+        "Immunization record",
+    )
+    second = attrs.evolve(first, id="document-2", url="https://files.test/other")
+    record = discovery.Record(
+        "record",
+        "profile_documents",
+        "https://example.test/profile",
+        dt.datetime(2026, 7, 19, tzinfo=dt.UTC),
+        {"documents": ()},
+        child.id,
+        documents=(first, second),
+    )
+    first_source = tmp_path / "first.tmp"
+    first_source.write_bytes(b"first")
+    second_source = tmp_path / "second.tmp"
+    second_source.write_bytes(b"second")
+    with archive.Archive(tmp_path / "archive") as store:
+        store.upsert_child(child)
+        record_path = store.store_record(record, child)
+        first_path = store.store_document(
+            archive.StoredDocument(
+                first,
+                record,
+                child,
+                first_source,
+                archive.sha256(first_source),
+                "application/pdf",
+            )
+        )
+        second_path = store.store_document(
+            archive.StoredDocument(
+                second,
+                record,
+                child,
+                second_source,
+                archive.sha256(second_source),
+            )
+        )
+        rows = store.connection.execute(
+            "SELECT * FROM documents ORDER BY id"
+        ).fetchall()
+        links = store.connection.execute("SELECT * FROM record_documents").fetchall()
+        replacement_source = tmp_path / "replacement.tmp"
+        replacement_source.write_bytes(b"replacement")
+        renamed = attrs.evolve(first, filename="renamed.pdf")
+        replaced_path = store.store_document(
+            archive.StoredDocument(
+                renamed,
+                record,
+                child,
+                replacement_source,
+                archive.sha256(replacement_source),
+            )
+        )
+        same_path_source = tmp_path / "same-path.tmp"
+        same_path_source.write_bytes(b"same path")
+        assert (
+            store.store_document(
+                archive.StoredDocument(
+                    renamed,
+                    record,
+                    child,
+                    same_path_source,
+                    archive.sha256(same_path_source),
+                )
+            )
+            == replaced_path
+        )
+        wrong_child = discovery.Child("wrong", "Wrong")
+        with pytest.raises(archive.ArchiveError, match="document child"):
+            store.store_document(
+                archive.StoredDocument(
+                    first,
+                    record,
+                    wrong_child,
+                    tmp_path / "unused",
+                    "hash",
+                )
+            )
+    assert first_path.relative_to(tmp_path / "archive") == Path(
+        "documents/A-Child/profile_documents/report.pdf"
+    )
+    assert second_path.name == "report-02.pdf"
+    assert replaced_path.name == "renamed.pdf"
+    assert not first_path.exists()
+    assert len(rows) == len(links) == 2
+    assert rows[0]["source_url"].endswith("X-Amz-Signature=REDACTED")
+    document = json.loads(record_path.read_text(encoding="utf-8"))
+    assert document["documents"][0]["description"] == "Immunization record"
+
+
 def test_store_record_rejects_wrong_child_and_cleans_conflict(tmp_path: Path) -> None:
     """Record context mismatches and path collisions cannot leave temporary JSON."""
     child = discovery.Child("child-1", "Child")
@@ -461,7 +560,7 @@ def test_reject_newer_schema(tmp_path: Path) -> None:
 def test_in_memory_archive_does_not_create_files(tmp_path: Path) -> None:
     """Dry-run storage provides the schema without touching its working directory."""
     with archive.Archive.memory() as store:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 5
     assert not tuple(tmp_path.iterdir())
 
 

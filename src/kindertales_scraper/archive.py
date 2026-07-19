@@ -14,7 +14,7 @@ import attrs
 
 from . import config, discovery, redaction
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 RECORD_VERSION = 1
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -149,6 +149,18 @@ class StoredMedia:
     http_properties: Mapping[str, Any] = attrs.field(factory=dict)
 
 
+@attrs.frozen
+class StoredDocument:
+    """Data required to commit one downloaded standalone document."""
+
+    document: discovery.DocumentReference
+    record: discovery.Record
+    child: discovery.Child | None
+    temporary_path: Path
+    sha256: str
+    content_type: str | None = None
+
+
 class Archive:
     """Own the SQLite index and atomic archive filesystem updates."""
 
@@ -194,7 +206,7 @@ class Archive:
 
     def _initialize(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2, 3, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, 4, SCHEMA_VERSION}:
             msg = f"unsupported archive schema version: {version}"
             raise ArchiveError(msg)
         self.connection.executescript(
@@ -229,6 +241,17 @@ class Archive:
                 relative_path TEXT NOT NULL UNIQUE, source_url TEXT NOT NULL,
                 observed_at TEXT NOT NULL, title TEXT, details_json TEXT NOT NULL,
                 available INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS documents (
+                id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE,
+                filename TEXT NOT NULL, content_type TEXT,
+                source_url TEXT NOT NULL, sha256 TEXT NOT NULL,
+                available INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS record_documents (
+                record_id TEXT NOT NULL REFERENCES records(id),
+                document_id TEXT NOT NULL REFERENCES documents(id),
+                PRIMARY KEY (record_id, document_id)
             );
             CREATE TABLE IF NOT EXISTS sync_runs (
                 id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
@@ -307,6 +330,16 @@ class Archive:
             "observed_at": record.observed_at.isoformat(),
             "source_url": redaction.url(record.source_url),
             "details": dict(record.details),
+            "documents": tuple(
+                {
+                    "id": item.id,
+                    "filename": item.filename,
+                    "content_type": item.content_type,
+                    "description": item.description,
+                    "source_url": redaction.url(item.url),
+                }
+                for item in record.documents
+            ),
         }
         temporary.write_text(
             json.dumps(document, indent=2, sort_keys=True) + "\n",
@@ -349,6 +382,80 @@ class Archive:
             temporary.unlink(missing_ok=True)
             raise
         return destination
+
+    def store_document(self, stored: StoredDocument) -> Path:
+        """Atomically place and index one standalone record attachment."""
+        if stored.child is not None and stored.child.id != stored.record.child_id:
+            msg = "document child does not match its record context"
+            raise ArchiveError(msg)
+        owner = safe_component(stored.child.name) if stored.child else "_account"
+        suffix = Path(stored.document.filename).suffix.casefold()
+        stem = Path(stored.document.filename).stem or stored.document.id
+        base_name = safe_component(stem)
+        category = safe_component(stored.record.category)
+        sequence = 1
+        while True:
+            sequence_suffix = "" if sequence == 1 else f"-{sequence:02d}"
+            relative = Path(
+                "documents",
+                owner,
+                category,
+                f"{base_name}{sequence_suffix}{suffix}",
+            )
+            row = self.connection.execute(
+                "SELECT id FROM documents WHERE relative_path=?",
+                (relative.as_posix(),),
+            ).fetchone()
+            if (row is None and not (self.root / relative).exists()) or (
+                row is not None and row["id"] == stored.document.id
+            ):
+                break
+            sequence += 1
+        destination = self.root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        previous = self.connection.execute(
+            "SELECT relative_path FROM documents WHERE id=?",
+            (stored.document.id,),
+        ).fetchone()
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO documents
+                (id, relative_path, filename, content_type, source_url, sha256)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                relative_path=excluded.relative_path,
+                filename=excluded.filename,
+                content_type=excluded.content_type,
+                source_url=excluded.source_url,
+                sha256=excluded.sha256,
+                available=1""",
+                (
+                    stored.document.id,
+                    relative.as_posix(),
+                    stored.document.filename,
+                    stored.content_type or stored.document.content_type,
+                    redaction.url(stored.document.url),
+                    stored.sha256,
+                ),
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO record_documents VALUES (?, ?)",
+                (stored.record.id, stored.document.id),
+            )
+            stored.temporary_path.replace(destination)
+        if previous is not None:
+            previous_path = Path(str(previous["relative_path"]))
+            if previous_path != relative:
+                (self.root / previous_path).unlink(missing_ok=True)
+        return destination
+
+    def link_document(self, record_id: str, document_id: str) -> None:
+        """Associate an already archived document with another record."""
+        self.connection.execute(
+            "INSERT OR IGNORE INTO record_documents VALUES (?, ?)",
+            (record_id, document_id),
+        )
+        self.connection.commit()
 
     def upsert_child(self, child: discovery.Child) -> None:
         """Insert or update an available child."""

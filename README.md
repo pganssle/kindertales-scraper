@@ -15,15 +15,17 @@ The scraper also snapshots baby bulletins, immunization, medication, milestone,
 and profile/document pages for each child. Attendance is extracted from bounded,
 child-linked news-feed events, including check-in and check-out. Enrollment is
 read from the application's structured active-forms endpoint and retains only
-completed values, not unused controls or pull-down choices. Linked standalone
-documents are not yet downloaded.
+completed values, including authorized pickups, not unused controls or
+pull-down choices. Linked standalone documents are downloaded without metadata
+changes.
 
 Message-folder listings and the billing dashboard are separately opt-in because
 they can contain private correspondence and financial information. Set
 `messages = true` and/or `billing = true` under `[exports]` only when those
 areas are covered by the written authorization and should be included in this
-archive. The message snapshots cover inbox, sent, draft, scheduled, and contact
-listings; they don't yet follow individual messages or download attachments.
+archive. Message exports cover inbox, sent, draft, scheduled, and contacts.
+They follow pagination and individual messages to retain subjects, headers,
+unread state, bodies, and supported attachments.
 
 ## Installation
 
@@ -109,15 +111,22 @@ The current legacy HTML adapter still requires `--from`. Later bounded runs use
 the latest per-child activity timestamp with the configured seven-day overlap.
 Archived files are never deleted.
 
+Activity discovery reports one page per child and date. Record discovery grows
+its total as message pagination and individual messages are discovered.
+
 ## Archive and privacy
 
-`index.sqlite3` uses a versioned schema with `children`, `activities`, `media`,
-`activity_media`, and `sync_runs` tables. It retains source/final hashes,
+`index.sqlite3` uses a versioned schema with child, activity, media, record,
+document, relationship, and sync-run tables. It retains source/final hashes,
 redacted source URLs, scraped context, and the metadata fields selected for
 embedding. A sidecar is created only to back up meaningful original metadata
 that ExifTool will replace; it contains the original portable ExifTool object
 and none of the scraper's metadata. Host-derived fields such as `SourceFile`,
 `File:Directory`, local file timestamps, and permissions are omitted.
+
+Standalone record attachments are stored under `documents/`, indexed with their
+source URL, content type, and SHA-256, and checked by `verify`. They are not run
+through ExifTool.
 
 The archive contains sensitive information about children. It intentionally uses
 ordinary destination filesystem permissions so it remains portable; securing

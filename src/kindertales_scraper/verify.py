@@ -33,6 +33,7 @@ class VerificationReport:
     checked_media: int
     issues: tuple[VerificationIssue, ...]
     checked_records: int = 0
+    checked_documents: int = 0
 
     @property
     def valid(self) -> bool:
@@ -92,6 +93,14 @@ class ArchiveVerifier:
             issues.extend(
                 issue for row in record_rows for issue in self._verify_record(row)
             )
+            document_rows = connection.execute(
+                "SELECT * FROM documents ORDER BY id"
+            ).fetchall()
+            issues.extend(
+                issue
+                for row in document_rows
+                for issue in self._verify_document(row)
+            )
             orphan_count = connection.execute(
                 """SELECT count(*) FROM activity_media am
                 LEFT JOIN activities a ON a.id=am.activity_id
@@ -104,7 +113,25 @@ class ArchiveVerifier:
                         None, f"{orphan_count} orphan activity-media links"
                     )
                 )
-            return VerificationReport(len(rows), tuple(issues), len(record_rows))
+            document_orphans = connection.execute(
+                """SELECT count(*) FROM record_documents rd
+                LEFT JOIN records r ON r.id=rd.record_id
+                LEFT JOIN documents d ON d.id=rd.document_id
+                WHERE r.id IS NULL OR d.id IS NULL"""
+            ).fetchone()[0]
+            if document_orphans:
+                issues.append(
+                    VerificationIssue(
+                        None,
+                        f"{document_orphans} orphan record-document links",
+                    )
+                )
+            return VerificationReport(
+                len(rows),
+                tuple(issues),
+                len(record_rows),
+                len(document_rows),
+            )
         except sqlite3.DatabaseError as error:
             return VerificationReport(
                 0,
@@ -142,6 +169,21 @@ class ArchiveVerifier:
                 VerificationIssue(record_id, "record details do not match index")
             )
         return tuple(issues)
+
+    def _verify_document(self, row: sqlite3.Row) -> tuple[VerificationIssue, ...]:
+        document_id = str(row["id"])
+        path = self._contained(str(row["relative_path"]))
+        if path is None:
+            return (
+                VerificationIssue(document_id, "document path escapes archive root"),
+            )
+        if not path.is_file():
+            return (VerificationIssue(document_id, "document file is missing"),)
+        if archive.sha256(path) != row["sha256"]:
+            return (
+                VerificationIssue(document_id, "document SHA-256 does not match index"),
+            )
+        return ()
 
     def _verify_row(self, row: sqlite3.Row) -> tuple[VerificationIssue, ...]:
         media_id = str(row["id"])
