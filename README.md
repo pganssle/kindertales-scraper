@@ -119,7 +119,10 @@ its total as message pagination and individual messages are discovered. During
 a real sync, each completed activity page immediately adds its media to a live
 priority queue. Ready media is admitted before queued discovery work, with at
 most two media downloads active, while spare request capacity continues through
-later activity pages. A dry run performs discovery without requesting media.
+later activity pages. Independent legacy daily pages are traversed newest-first
+so a historical backfill begins downloading recent media promptly while it
+continues toward the requested start date. A dry run performs discovery without
+requesting media.
 
 ## Archive and privacy
 
