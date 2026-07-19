@@ -16,6 +16,10 @@ _EMBEDDABLE_SUFFIXES = frozenset(
     {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".mp4", ".mov"}
 )
 _DATETIME_TAGS = frozenset({"CreateDate", "DateCreated", "DateTimeOriginal"})
+_UNSUPPORTED_GROUPS = {
+    ".mov": frozenset({"exif", "iptc"}),
+    ".mp4": frozenset({"exif", "iptc"}),
+}
 
 
 @attrs.frozen
@@ -267,6 +271,8 @@ class ArchiveVerifier:
             actual_by_name.setdefault(tag, value)
         issues = []
         for name, expected in embedded.items():
+            if not self._supports_group(media_path, name):
+                continue
             tag = name.rsplit("]", 1)[-1].rsplit(":", 1)[-1]
             if tag not in actual_by_name:
                 issues.append(
@@ -277,6 +283,15 @@ class ArchiveVerifier:
                     VerificationIssue(media_id, f"embedded metadata differs for {name}")
                 )
         return tuple(issues)
+
+    @staticmethod
+    def _supports_group(media_path: Path, name: str) -> bool:
+        if name.startswith("[") and "]" in name:
+            group = name[1:].split("]", 1)[0]
+        else:
+            group = name.partition(":")[0]
+        unsupported = _UNSUPPORTED_GROUPS.get(media_path.suffix.casefold(), ())
+        return group.casefold() not in unsupported
 
     @staticmethod
     def _value_matches(actual: object, expected: object, *, tag: str) -> bool:

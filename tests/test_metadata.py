@@ -230,8 +230,39 @@ def test_read_and_atomic_enrichment(
     assert result.inferred_gps
     assert runner.calls[0][1:4] == ("-j", "-G", "-n")
     assert "-overwrite_original" in runner.calls[1]
+    assert runner.calls[2][1:4] == ("-j", "-G", "-n")
     assert path.read_bytes() == b"media"
     assert not path.with_suffix(".jpg.enriching").exists()
+
+
+def test_enrichment_records_only_fields_retained_by_the_container(
+    tmp_path: Path,
+    context: tuple[discovery.Child, discovery.Activity],
+) -> None:
+    """Unsupported requested fields are omitted from the verification contract."""
+    path = tmp_path / "video.mp4"
+    path.write_bytes(b"media")
+    outputs = iter(
+        (
+            '[{"QuickTime:Duration": 1}]',
+            '[{"[XMP-dc]Description": "A caption"}]',
+        )
+    )
+
+    def run(
+        arguments: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        output = "" if "-overwrite_original" in arguments else next(outputs)
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    child, activity = context
+    result = metadata.ExifTool(runner=run).enrich(
+        path,
+        child,
+        activity,
+        settings(),
+    )
+    assert result.embedded_fields == {"XMP-dc:Description": "A caption"}
 
 
 @pytest.mark.parametrize(
@@ -246,7 +277,7 @@ def test_invalid_exiftool_output(tmp_path: Path, output: str, message: str) -> N
         metadata.ExifTool(runner=FakeRunner(output)).read(path)
 
 
-@pytest.mark.parametrize("phase", ["read", "write"])
+@pytest.mark.parametrize("phase", ["read", "write", "readback"])
 def test_exiftool_failure_cleans_atomic_copy(
     tmp_path: Path,
     context: tuple[discovery.Child, discovery.Activity],
@@ -262,7 +293,7 @@ def test_exiftool_failure_cleans_atomic_copy(
     ) -> subprocess.CompletedProcess[str]:
         nonlocal calls
         calls += 1
-        if phase == "read" or calls == 2:
+        if phase == "read" or (phase == "write" and calls == 2) or calls == 3:
             if phase == "read":
                 raise FileNotFoundError
             raise subprocess.CalledProcessError(1, arguments)

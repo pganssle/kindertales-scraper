@@ -73,6 +73,19 @@ def sidecar_metadata(
     return portable_original(original) if conflict else {}
 
 
+def confirmed_fields(
+    requested: Mapping[str, str],
+    actual: Mapping[str, Any],
+) -> Mapping[str, str]:
+    """Return requested fields that ExifTool confirms the container retained."""
+    actual_tags = frozenset(_qualified_tag(name) for name in actual)
+    return {
+        name: value
+        for name, value in requested.items()
+        if _qualified_tag(name) in actual_tags
+    }
+
+
 def _has(metadata: Mapping[str, Any], names: frozenset[str]) -> bool:
     return any(_tag_name(key) in names for key in metadata)
 
@@ -229,14 +242,19 @@ class ExifTool:
                 capture_output=True,
                 text=True,
             )
+            embedded_fields = confirmed_fields(fields, self.read(temporary))
             temporary.replace(path)
-        except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        except (
+            FileNotFoundError,
+            subprocess.CalledProcessError,
+            MetadataError,
+        ) as error:
             temporary.unlink(missing_ok=True)
             msg = "ExifTool could not enrich media metadata"
             raise MetadataError(msg) from error
         return Enrichment(
             original,
-            fields,
+            embedded_fields,
             inferred_time,
             inferred_gps,
             sidecar_metadata(original, fields),

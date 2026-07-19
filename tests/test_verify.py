@@ -127,6 +127,32 @@ def test_valid_archive(tmp_path: Path) -> None:
     assert media_path.is_file()
 
 
+def test_video_requires_xmp_but_not_unsupported_legacy_groups(tmp_path: Path) -> None:
+    """MP4 verification ignores legacy IPTC/EXIF fields but still checks XMP."""
+    create_archive(
+        tmp_path,
+        ".mp4",
+        {
+            "EXIF:DateTimeOriginal": "2026:07:01 00:00:00",
+            "[IPTC]Caption-Abstract": "Caption",
+            "XMP-dc:Description": "Caption",
+        },
+    )
+    verifier = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool({"[XMP-dc]Description": "Caption"}),
+    )
+    assert verifier.run().valid
+
+    missing_xmp = verify.ArchiveVerifier(
+        tmp_path / "archive",
+        FakeExifTool({}),
+    ).run()
+    assert [issue.message for issue in missing_xmp.issues] == [
+        "embedded metadata is missing XMP-dc:Description"
+    ]
+
+
 def test_valid_standalone_document(tmp_path: Path) -> None:
     """Indexed standalone document files and hashes participate in verification."""
     create_archive(tmp_path)
