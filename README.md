@@ -11,10 +11,12 @@ authorization from Kindertales before using this program. Authorization should
 cover the family account, its linked children, session reuse, and the configured
 request rate. See the [Kindertales Terms of Service](https://www.kindertales.com/terms-of-service/).
 
-The scraper also snapshots the server-rendered baby bulletin, attendance,
-enrollment, immunization, medication, milestone, and profile/document pages for
-each child. These snapshots retain visible text and non-secret field values;
-they don't yet download linked standalone documents.
+The scraper also snapshots baby bulletins, immunization, medication, milestone,
+and profile/document pages for each child. Attendance is extracted from bounded,
+child-linked news-feed events, including check-in and check-out. Enrollment is
+read from the application's structured active-forms endpoint and retains only
+completed values, not unused controls or pull-down choices. Linked standalone
+documents are not yet downloaded.
 
 Message-folder listings and the billing dashboard are separately opt-in because
 they can contain private correspondence and financial information. Set

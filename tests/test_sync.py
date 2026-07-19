@@ -74,8 +74,13 @@ class FakeRecordAdapter(FakeAdapter):
         self.account_options: list[tuple[bool, bool]] = []
 
     async def child_records(
-        self, child_id: str
+        self,
+        child_id: str,
+        *,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
     ) -> tuple[discovery.Record, ...]:
+        self.bounds.append((from_date, through_date))
         return (self._record("profile", child_id),)
 
     async def account_records(

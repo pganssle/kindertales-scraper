@@ -338,6 +338,35 @@ def test_store_structured_child_and_account_records(tmp_path: Path) -> None:
     assert rows[1]["source_url"].endswith("signature=REDACTED")
 
 
+def test_new_record_source_replaces_same_child_category(tmp_path: Path) -> None:
+    """A corrected endpoint may supersede an older snapshot at the same path."""
+    child = discovery.Child("child-1", "A Child")
+    observed = dt.datetime(2026, 7, 19, tzinfo=dt.UTC)
+    old = discovery.Record(
+        "old",
+        "attendance",
+        "https://example.test/profile",
+        observed,
+        {"ui": True},
+        child.id,
+    )
+    new = discovery.Record(
+        "new",
+        "attendance",
+        "https://example.test/feed",
+        observed,
+        {"events": []},
+        child.id,
+    )
+    with archive.Archive(tmp_path) as store:
+        store.upsert_child(child)
+        path = store.store_record(old, child)
+        assert store.store_record(new, child) == path
+        rows = store.connection.execute("SELECT id FROM records").fetchall()
+    assert [row["id"] for row in rows] == ["new"]
+    assert json.loads(path.read_text(encoding="utf-8"))["details"] == {"events": []}
+
+
 def test_store_record_rejects_wrong_child_and_cleans_conflict(tmp_path: Path) -> None:
     """Record context mismatches and path collisions cannot leave temporary JSON."""
     child = discovery.Child("child-1", "Child")

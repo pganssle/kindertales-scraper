@@ -296,6 +296,16 @@ class Archive:
         try:
             with self.connection:
                 self.connection.execute(
+                    "DELETE FROM records WHERE relative_path=? AND id<>? "
+                    "AND category=? AND child_id IS ?",
+                    (
+                        relative.as_posix(),
+                        record.id,
+                        record.category,
+                        record.child_id,
+                    ),
+                )
+                self.connection.execute(
                     """INSERT INTO records
                     (id, category, child_id, relative_path, source_url, observed_at,
                     title, details_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)

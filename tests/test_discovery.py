@@ -381,11 +381,16 @@ LEGACY_FEED = """
 LEGACY_ATTENDANCE_FEED = """
 <table>
   <tr class="box-shadow-default"><td>
-    <span>8:05 AM</span><a href="/?pg=attendance&amp;cid=child-1">Checked In</a>
+    <div>Tuesday</div><div>8:05 AM</div>
+    <div onclick="location.href='/?pg=attendance&amp;cid=child-1'">Checked In</div>
+    <input disabled>
     <a href="/?pg=unrelated">Details</a><div>July 14</div>
   </td></tr>
   <tr class="box-shadow-default"><td>
     <span>No clock</span><a href="/?cid=child-1">Ignored</a><div>July 14</div>
+  </td></tr>
+  <tr class="box-shadow-default"><td>
+    <span>10:00 AM</span><a href="/?cid=child-1">Snack</a><div>July 14</div>
   </td></tr>
   <tr class="box-shadow-default"><td><tr><td>Nested</td></tr></td></tr>
 </table>
@@ -492,12 +497,108 @@ def test_news_feed_supplies_non_media_attendance_events() -> None:
     assert activities[0].kind == "Checked In"
     assert activities[0].occurred_at.isoformat() == "2026-07-14T08:05:00-04:00"
     assert activities[0].media == ()
+    span_clock = discovery.parse_notification_activities(
+        '<tr class="box-shadow-default"><td><span>9:10 AM</span>'
+        '<a href="/?cid=child-1">Checked Out</a><div>July 14</div></td></tr>',
+        "child-1",
+        dt.date(2026, 7, 14),
+        dt.UTC,
+    )
+    assert span_clock[0].occurred_at == dt.datetime(2026, 7, 14, 9, 10, tzinfo=dt.UTC)
     assert not discovery.parse_notification_context(
         '<tr class="box-shadow-default"><td><a class="image_video" '
         'href="/photo.jpg"></a><div>July 14</div></td></tr>',
         dt.date(2026, 7, 14),
         dt.UTC,
     )
+
+
+def test_bounded_attendance_record_contains_only_linked_events() -> None:
+    """Attendance snapshots expose bounded child events instead of profile UI."""
+    record = discovery.parse_attendance_record(
+        LEGACY_ATTENDANCE_FEED,
+        "child-1",
+        ZoneInfo("America/New_York"),
+        discovery.RecordWindow(
+            dt.date(2026, 7, 14),
+            dt.date(2026, 7, 15),
+            "https://example.test/feed",
+            dt.datetime(2026, 7, 19, tzinfo=dt.UTC),
+        ),
+    )
+    assert record.details["from_date"] == "2026-07-14"
+    assert record.details["through_date"] == "2026-07-15"
+    assert len(record.details["events"]) == 1
+    assert record.details["events"][0]["type"] == "Checked In"
+
+
+def test_enrollment_forms_contain_only_completed_values() -> None:
+    """Enrollment extraction drops unused controls and unselected options."""
+    record = discovery.parse_enrollment_forms(
+        {
+            "defaultForms": {
+                "1": {
+                    "form": json.dumps(
+                        [
+                            {"label": "Name", "name": "name", "value": "Mark"},
+                            "not-an-object",
+                            {"label": "Unused", "name": "unused", "value": ""},
+                            {"label": 2, "name": "", "value": "Value"},
+                            {
+                                "label": "Room <b>choice</b>",
+                                "name": "room",
+                                "values": [
+                                    {"label": "A", "value": "a"},
+                                    {"label": "B", "value": "b", "selected": True},
+                                ],
+                            },
+                        ]
+                    )
+                },
+                "invalid": {"form": "not-json"},
+                "wrong": {"form": "{}"},
+                "missing": {"form": None},
+                "not-a-form": "wrong",
+            },
+            "customForms": [
+                {"form": json.dumps([{"name": "note", "value": "Complete"}])},
+                {"form": "not-json"},
+                "invalid",
+            ],
+        },
+        "child-1",
+        source_url="https://example.test/forms",
+        observed_at=dt.datetime(2026, 7, 19, tzinfo=dt.UTC),
+    )
+    assert record.details == {
+        "forms": (
+            {
+                "kind": "default",
+                "id": "1",
+                "entries": (
+                    {"value": "Mark", "label": "Name", "name": "name"},
+                    {"value": "Value"},
+                    {
+                        "value": ("b",),
+                        "label": "Room choice",
+                        "name": "room",
+                    },
+                ),
+            },
+            {
+                "kind": "custom",
+                "id": "0",
+                "entries": ({"value": "Complete", "name": "note"},),
+            },
+        )
+    }
+    empty = discovery.parse_enrollment_forms(
+        {"defaultForms": [], "customForms": {}},
+        "child-1",
+        source_url="https://example.test/forms",
+        observed_at=dt.datetime(2026, 7, 19, tzinfo=dt.UTC),
+    )
+    assert empty.details == {"forms": ()}
 
 
 @pytest.mark.asyncio
@@ -571,26 +672,77 @@ async def test_legacy_adapter_snapshots_child_record_routes() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        if "notificationsV2" in request.url.path:
+            return httpx.Response(200, text=LEGACY_ATTENDANCE_FEED)
+        if request.url.path.endswith("allActiveForms.php"):
+            return httpx.Response(200, json={"defaultForms": {}, "customForms": []})
         return httpx.Response(200, text="<title>Synthetic</title>")
 
     async with httpx.AsyncClient(
         base_url="https://example.test", transport=httpx.MockTransport(handler)
     ) as client:
         records = await discovery.LegacyKindertalesAdapter(client).child_records(
-            "child-1"
+            "child-1",
+            from_date=dt.date(2026, 7, 14),
+            through_date=dt.date(2026, 7, 16),
         )
     assert [record.category for record in records] == [
-        "baby_bulletin",
         "attendance",
         "enrollment",
+        "baby_bulletin",
         "immunizations",
         "medications",
         "milestones",
         "profile_documents",
     ]
-    assert all(request.url.params["cid"] == "child-1" for request in requests)
-    assert requests[0].url.params["subpg"] == "child"
-    assert "subpg" not in requests[1].url.params
+    assert requests[1].content == b"cid=child-1"
+    assert requests[2].url.params["subpg"] == "child"
+    assert "subpg" not in requests[3].url.params
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ["not-json", "[]"])
+async def test_child_record_enrollment_response_must_be_an_object(
+    payload: str,
+) -> None:
+    """Invalid structured enrollment responses fail at discovery."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "notificationsV2" in request.url.path:
+            return httpx.Response(200, text="")
+        return httpx.Response(200, text=payload)
+
+    class Limiter:
+        async def acquire(self) -> float:
+            return 0.0
+
+    requester = scheduler.Requester(
+        config.RequestPolicy(
+            quotas=(config.Quota(100, 1),),
+            jitter_fraction=0,
+            max_retries=0,
+        ),
+        Limiter(),
+    )
+    async with httpx.AsyncClient(
+        base_url="https://example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = discovery.LegacyKindertalesAdapter(client, requester=requester)
+        with pytest.raises(discovery.DiscoveryError, match="enrollment endpoint"):
+            await adapter.child_records(
+                "child-1",
+                from_date=dt.date(2026, 7, 14),
+                through_date=dt.date(2026, 7, 16),
+            )
+
+
+@pytest.mark.asyncio
+async def test_child_records_require_date_bounds() -> None:
+    """Attendance records cannot silently escape the requested range."""
+    async with httpx.AsyncClient(base_url="https://example.test") as client:
+        with pytest.raises(discovery.DiscoveryError, match="--from and --through"):
+            await discovery.LegacyKindertalesAdapter(client).child_records("child")
 
 
 @pytest.mark.asyncio

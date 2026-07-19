@@ -513,6 +513,13 @@ class _LegacyActivityParser(html.parser.HTMLParser):
 
 
 _CLOCK = re.compile(r"(?i)\b(\d{1,2}):(\d{2})\s*(am|pm)\b")
+_CHILD_ID_QUERY = re.compile(
+    r"(?:[?&]|&amp;)cid=([^&'\"\s)]+)",
+    re.IGNORECASE,
+)
+_ATTENDANCE_KIND = re.compile(
+    r"(?i)\bcheck(?:ed)?[-\s]+(?P<direction>in|out)\b"
+)
 
 
 @attrs.frozen
@@ -556,6 +563,9 @@ class _NotificationFeedParser(html.parser.HTMLParser):
             return
         if self._row is None:
             return
+        for value in attributes.values():
+            if value is not None:
+                self._row.child_ids.extend(_CHILD_ID_QUERY.findall(value))
         if tag == "tr":
             self._row_depth += 1
         if tag == "span":
@@ -563,7 +573,6 @@ class _NotificationFeedParser(html.parser.HTMLParser):
         if tag == "a" and (href := attributes.get("href")):
             split_url = urlsplit(href)
             source_path = unquote(split_url.path)
-            self._row.child_ids.extend(parse_qs(split_url.query).get("cid", ()))
             if "image_video" in _classes(attributes):
                 self._row.media_ids.append(
                     _stable_id(split_url.netloc, source_path)
@@ -670,17 +679,27 @@ def parse_notification_activities(
             None,
         )
         if occurred_time is None:
+            occurred_time = next(
+                (
+                    parsed
+                    for value in row.text
+                    if (parsed := _clock(value)) is not None
+                ),
+                None,
+            )
+        if occurred_time is None:
             continue
-        kind = next(
+        attendance_match = next(
             (
-                value
+                match
                 for value in row.text
-                if _clock(value) is None
-                and date_label not in value
-                and not value.lstrip().startswith("@")
+                if (match := _ATTENDANCE_KIND.search(value)) is not None
             ),
-            "News Feed",
+            None,
         )
+        if attendance_match is None:
+            continue
+        kind = f"Checked {attendance_match.group('direction').title()}"
         activities.append(
             Activity(
                 _stable_id(child_id, activity_date.isoformat(), *row.text),
@@ -692,6 +711,138 @@ def parse_notification_activities(
             )
         )
     return tuple(activities)
+
+
+@attrs.frozen
+class RecordWindow:
+    """Bounded observation context for a generated record snapshot."""
+
+    from_date: dt.date
+    through_date: dt.date
+    source_url: str
+    observed_at: dt.datetime
+
+
+def parse_attendance_record(
+    document: str,
+    child_id: str,
+    timezone: dt.tzinfo,
+    window: RecordWindow,
+) -> Record:
+    """Build a bounded attendance snapshot from child-linked news-feed rows."""
+    events: list[dict[str, Any]] = []
+    current = window.from_date
+    while current <= window.through_date:
+        events.extend(
+            {
+                "type": activity.kind,
+                "occurred_at": activity.occurred_at.isoformat(),
+                "details": dict(activity.details),
+            }
+            for activity in parse_notification_activities(
+                document,
+                child_id,
+                current,
+                timezone,
+            )
+        )
+        current += dt.timedelta(days=1)
+    return Record(
+        _stable_id("attendance", child_id, window.source_url),
+        "attendance",
+        window.source_url,
+        window.observed_at,
+        {
+            "from_date": window.from_date.isoformat(),
+            "through_date": window.through_date.isoformat(),
+            "events": tuple(events),
+        },
+        child_id,
+        "Attendance",
+    )
+
+
+def _clean_label(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(re.sub(r"<[^>]*>", " ", value).split())
+    return cleaned or None
+
+
+def _meaningful(value: object) -> bool:
+    return value not in (None, "", (), [], {})
+
+
+def _form_entries(raw_form: object) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(raw_form, str):
+        return ()
+    try:
+        items = json.loads(raw_form)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(items, list):
+        return ()
+    entries = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        selected = tuple(
+            option.get("value") or option.get("label")
+            for option in item.get("values", ())
+            if isinstance(option, dict) and option.get("selected")
+        ) if isinstance(item.get("values", ()), list) else ()
+        if not _meaningful(value) and selected:
+            value = selected
+        if not _meaningful(value):
+            continue
+        entry: dict[str, Any] = {"value": value}
+        if label := _clean_label(item.get("label")):
+            entry["label"] = label
+        if isinstance(item.get("name"), str) and item["name"]:
+            entry["name"] = item["name"]
+        entries.append(entry)
+    return tuple(entries)
+
+
+def parse_enrollment_forms(
+    payload: Mapping[str, Any],
+    child_id: str,
+    *,
+    source_url: str,
+    observed_at: dt.datetime,
+) -> Record:
+    """Extract only completed values from Kindertales enrollment forms."""
+    forms = []
+    raw_defaults = payload.get("defaultForms", {})
+    default_forms: tuple[tuple[object, object], ...] = (
+        tuple(raw_defaults.items()) if isinstance(raw_defaults, dict) else ()
+    )
+    for form_id, form in default_forms:
+        if not isinstance(form, dict):
+            continue
+        entries = _form_entries(form.get("form"))
+        if entries:
+            forms.append({"kind": "default", "id": str(form_id), "entries": entries})
+    raw_custom = payload.get("customForms", ())
+    custom_forms: tuple[tuple[int, object], ...] = (
+        tuple(enumerate(raw_custom)) if isinstance(raw_custom, list) else ()
+    )
+    for form_id, form in custom_forms:
+        if not isinstance(form, dict):
+            continue
+        entries = _form_entries(form.get("form"))
+        if entries:
+            forms.append({"kind": "custom", "id": str(form_id), "entries": entries})
+    return Record(
+        _stable_id("enrollment", child_id, source_url),
+        "enrollment",
+        source_url,
+        observed_at,
+        {"forms": tuple(forms)},
+        child_id,
+        "Enrollment",
+    )
 
 
 def _stable_id(*parts: str) -> str:
@@ -825,6 +976,21 @@ class LegacyKindertalesAdapter:
             return await send()
         return await self.requester.request(send)
 
+    async def post(
+        self,
+        path: str,
+        *,
+        data: Mapping[str, str],
+    ) -> httpx.Response:
+        """Send a read-only discovery POST through the request boundary."""
+
+        async def send() -> httpx.Response:
+            return await self.client.post(path, data=data)
+
+        if self.requester is None:
+            return await send()
+        return await self.requester.request(send)
+
     async def children(self) -> tuple[Child, ...]:
         """Return every child linked from the authenticated dashboard."""
         response = await self.get("/index.php", params={"pg": "dashboard"})
@@ -887,18 +1053,65 @@ class LegacyKindertalesAdapter:
             self._notification_documents.append(response.text)
         return self._notification_documents[0]
 
-    async def child_records(self, child_id: str) -> tuple[Record, ...]:
+    async def child_records(
+        self,
+        child_id: str,
+        *,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
+    ) -> tuple[Record, ...]:
         """Snapshot the read-only report and profile areas for one child."""
+        if from_date is None or through_date is None:
+            msg = "legacy attendance discovery requires --from and --through"
+            raise DiscoveryError(msg)
+        observed_at = dt.datetime.now(dt.UTC)
+        notification_document = await self._notification_document()
+        notification_url = str(
+            self.client.base_url.join(
+                "/modules/notificationsV2/notificationsv2.php?limit=200&offset=0"
+            )
+        )
+        records = [
+            parse_attendance_record(
+                notification_document,
+                child_id,
+                self.timezone,
+                RecordWindow(
+                    from_date,
+                    through_date,
+                    notification_url,
+                    observed_at,
+                ),
+            )
+        ]
+        enrollment_response = await self.post(
+            "/db/allActiveForms.php",
+            data={"cid": child_id},
+        )
+        enrollment_response.raise_for_status()
+        try:
+            enrollment_payload = enrollment_response.json()
+        except json.JSONDecodeError as error:
+            msg = "Kindertales enrollment endpoint returned invalid JSON"
+            raise DiscoveryError(msg) from error
+        if not isinstance(enrollment_payload, dict):
+            msg = "Kindertales enrollment endpoint must return an object"
+            raise DiscoveryError(msg)
+        records.append(
+            parse_enrollment_forms(
+                enrollment_payload,
+                child_id,
+                source_url=str(enrollment_response.url),
+                observed_at=observed_at,
+            )
+        )
         routes = (
             ("baby_bulletin", "babybulletin", "child"),
-            ("attendance", "attendanceprofile", None),
-            ("enrollment", "enrollment", "child"),
             ("immunizations", "immunization", None),
             ("medications", "medications", "main"),
             ("milestones", "milestonereport", None),
             ("profile_documents", "profiledetails", None),
         )
-        records = []
         for category, page, subpage in routes:
             params = {"pg": page, "cid": child_id}
             if subpage is not None:
@@ -910,7 +1123,7 @@ class LegacyKindertalesAdapter:
                     response.text,
                     category=category,
                     source_url=str(response.url),
-                    observed_at=dt.datetime.now(dt.UTC),
+                    observed_at=observed_at,
                     child_id=child_id,
                 )
             )

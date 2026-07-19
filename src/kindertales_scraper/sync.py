@@ -53,6 +53,9 @@ class RecordAdapter(Protocol):
     async def child_records(
         self,
         child_id: str,
+        *,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
     ) -> tuple[discovery.Record, ...]:
         """Return record-area snapshots for one child."""
         ...
@@ -157,7 +160,7 @@ class SyncEngine:
                     ]
                 )
                 self.reporter.advance(progress.Stage.DISCOVERY)
-            records = await self._discover_records_with_progress(children)
+            records = await self._discover_records_with_progress(children, bounds)
             media_count = len(
                 {medium.id for _, item in activities for medium in item.media}
             )
@@ -213,6 +216,7 @@ class SyncEngine:
     async def _discover_records(
         self,
         children: Sequence[discovery.Child],
+        bounds: Bounds,
     ) -> list[tuple[discovery.Child | None, discovery.Record]]:
         if not isinstance(self.adapter, RecordAdapter):
             return []
@@ -221,7 +225,11 @@ class SyncEngine:
             for child in children:
                 records.extend(
                     (child, record)
-                    for record in await self.adapter.child_records(child.id)
+                    for record in await self.adapter.child_records(
+                        child.id,
+                        from_date=bounds.from_date,
+                        through_date=bounds.through_date,
+                    )
                 )
         if self.settings.exports.messages or self.settings.exports.billing:
             records.extend(
@@ -236,11 +244,12 @@ class SyncEngine:
     async def _discover_records_with_progress(
         self,
         children: Sequence[discovery.Child],
+        bounds: Bounds,
     ) -> list[tuple[discovery.Child | None, discovery.Record]]:
         requests = self._record_request_count(children)
         if requests:
             self.reporter.start(progress.Stage.RECORDS, requests)
-        records = await self._discover_records(children)
+        records = await self._discover_records(children, bounds)
         for _ in range(requests):
             self.reporter.advance(progress.Stage.RECORDS)
         return records
