@@ -5,7 +5,7 @@ import hashlib
 import html.parser
 import json
 import re
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -1004,6 +1004,7 @@ class LegacyKindertalesAdapter:
         cursor: str | None = None,
         from_date: dt.date | None = None,
         through_date: dt.date | None = None,
+        page_complete: Callable[[], None] | None = None,
     ) -> AsyncIterator[Activity]:
         """Yield daily-report activities over an inclusive bounded range."""
         del cursor
@@ -1025,6 +1026,8 @@ class LegacyKindertalesAdapter:
                 },
             )
             response.raise_for_status()
+            if page_complete is not None:
+                page_complete()
             for activity in parse_legacy_activities(
                 response.text,
                 child_id,
@@ -1045,6 +1048,17 @@ class LegacyKindertalesAdapter:
             ):
                 yield activity
             current += dt.timedelta(days=1)
+
+    @staticmethod
+    def activity_page_count(
+        *,
+        from_date: dt.date | None,
+        through_date: dt.date | None,
+    ) -> int:
+        """Return the number of daily-report requests for one child."""
+        if from_date is None or through_date is None:
+            return 0
+        return max(0, (through_date - from_date).days + 1)
 
     async def _notification_document(self) -> str:
         if not self._notification_documents:
@@ -1218,6 +1232,7 @@ class KindertalesAdapter:
         cursor: str | None = None,
         from_date: dt.date | None = None,
         through_date: dt.date | None = None,
+        page_complete: Callable[[], None] | None = None,
     ) -> AsyncIterator[Activity]:
         """Yield all activity pages, rejecting repeated cursors."""
         seen: set[str] = set()
@@ -1240,6 +1255,8 @@ class KindertalesAdapter:
                 msg = "activities response must be an object"
                 raise DiscoveryError(msg)
             page = parse_activity_page(payload)
+            if page_complete is not None:
+                page_complete()
             for activity in page.activities:
                 yield activity
             if page.next_cursor is None:

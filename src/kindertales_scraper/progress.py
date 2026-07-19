@@ -11,7 +11,7 @@ import tqdm
 class Stage(enum.Enum):
     """A bounded synchronization phase."""
 
-    DISCOVERY = ("Discovering activities", "child")
+    DISCOVERY = ("Discovering activities", "page")
     RECORDS = ("Discovering records", "page")
     MEDIA = ("Archiving media", "file")
 

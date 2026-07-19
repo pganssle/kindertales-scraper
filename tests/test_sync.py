@@ -3,7 +3,7 @@
 import datetime as dt
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import attrs
@@ -54,8 +54,10 @@ class FakeAdapter:
         cursor: str | None = None,
         from_date: dt.date | None = None,
         through_date: dt.date | None = None,
+        page_complete: Callable[[], None] | None = None,
     ) -> AsyncIterator[discovery.Activity]:
         assert cursor is None
+        assert page_complete is None
         self.bounds.append((from_date, through_date))
         for activity in self.activity_records:
             if activity.child_id == child_id:
@@ -106,6 +108,45 @@ class FakeRecordAdapter(FakeAdapter):
             {"text": ["Synthetic"]},
             child_id,
         )
+
+
+class CountedFakeAdapter(FakeAdapter):
+    """Expose a known one-page-per-date discovery plan."""
+
+    @staticmethod
+    def activity_page_count(
+        *,
+        from_date: dt.date | None,
+        through_date: dt.date | None,
+    ) -> int:
+        assert from_date is not None
+        assert through_date is not None
+        return (through_date - from_date).days + 1
+
+    async def activities(
+        self,
+        child_id: str,
+        *,
+        cursor: str | None = None,
+        from_date: dt.date | None = None,
+        through_date: dt.date | None = None,
+        page_complete: Callable[[], None] | None = None,
+    ) -> AsyncIterator[discovery.Activity]:
+        assert from_date is not None
+        assert through_date is not None
+        assert page_complete is not None
+        current = from_date
+        while current <= through_date:
+            page_complete()
+            current += dt.timedelta(days=1)
+        async for activity in super().activities(
+            child_id,
+            cursor=cursor,
+            from_date=from_date,
+            through_date=through_date,
+        ):
+            yield activity
+
 
 class FakeEnricher:
     """Enrich media deterministically without an ExifTool installation."""
@@ -343,6 +384,33 @@ async def test_dry_run_filters_without_writing(
         )
     assert summary == sync.SyncSummary(1, 1, 1, dry_run=True)
     assert adapter.bounds == [(dt.date(2026, 7, 2), dt.date(2026, 7, 2))]
+
+
+@pytest.mark.asyncio
+async def test_discovery_progress_counts_daily_pages(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """A long dated traversal advances once per completed daily request."""
+    child, activities = records
+    reporter = RecordingReporter()
+    adapter = CountedFakeAdapter((child,), activities)
+    async for runner, _store in engine(
+        tmp_path,
+        adapter,
+        httpx.MockTransport(lambda _request: httpx.Response(500)),
+        reporter,
+    ):
+        await runner.run(
+            sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 3)),
+            dry_run=True,
+        )
+    assert reporter.events[:4] == [
+        ("start", progress.Stage.DISCOVERY, 3),
+        ("advance", progress.Stage.DISCOVERY, 1),
+        ("advance", progress.Stage.DISCOVERY, 1),
+        ("advance", progress.Stage.DISCOVERY, 1),
+    ]
 
 
 @pytest.mark.asyncio

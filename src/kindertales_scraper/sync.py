@@ -3,7 +3,7 @@
 import datetime as dt
 import hashlib
 import tempfile
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, Self, cast, runtime_checkable
 
@@ -41,8 +41,23 @@ class Adapter(Protocol):
         cursor: str | None = None,
         from_date: dt.date | None = None,
         through_date: dt.date | None = None,
+        page_complete: Callable[[], None] | None = None,
     ) -> AsyncIterator[discovery.Activity]:
         """Iterate bounded activity history."""
+        ...
+
+
+@runtime_checkable
+class CountedActivityAdapter(Protocol):
+    """Activity adapter whose bounded page count is known before discovery."""
+
+    def activity_page_count(
+        self,
+        *,
+        from_date: dt.date | None,
+        through_date: dt.date | None,
+    ) -> int:
+        """Return the number of requests needed for one child."""
         ...
 
 
@@ -154,13 +169,16 @@ class SyncEngine:
         cursors = dict(self.store.latest_cursors())
         try:
             children = self.name_resolver.resolve(await self.adapter.children())
-            self.reporter.start(progress.Stage.DISCOVERY, len(children))
+            (
+                child_bounds,
+                discovery_total,
+                page_complete,
+                child_complete,
+            ) = self._discovery_plan(children, bounds, cursors)
+            self.reporter.start(progress.Stage.DISCOVERY, discovery_total)
             activities: list[tuple[discovery.Child, discovery.Activity]] = []
             records: list[tuple[discovery.Child | None, discovery.Record]] = []
-            for child in children:
-                effective_from = self._effective_from(
-                    bounds.from_date, cursors.get(child.id)
-                )
+            for child, effective_from in child_bounds:
                 activities.extend(
                     [
                         (child, activity)
@@ -168,11 +186,12 @@ class SyncEngine:
                             child.id,
                             from_date=effective_from,
                             through_date=bounds.through_date,
+                            page_complete=page_complete,
                         )
                         if self._included(activity, bounds)
                     ]
                 )
-                self.reporter.advance(progress.Stage.DISCOVERY)
+                child_complete()
             records = await self._discover_records_with_progress(children, bounds)
             media_count = len(
                 {medium.id for _, item in activities for medium in item.media}
@@ -225,6 +244,46 @@ class SyncEngine:
             raise
         finally:
             self.reporter.close()
+
+    def _discovery_plan(
+        self,
+        children: Sequence[discovery.Child],
+        bounds: Bounds,
+        cursors: Mapping[str, str],
+    ) -> tuple[
+        tuple[tuple[discovery.Child, dt.date | None], ...],
+        int,
+        Callable[[], None] | None,
+        Callable[[], None],
+    ]:
+        child_bounds = tuple(
+            (
+                child,
+                self._effective_from(bounds.from_date, cursors.get(child.id)),
+            )
+            for child in children
+        )
+        adapter = self.adapter
+        if not isinstance(adapter, CountedActivityAdapter):
+            return (
+                child_bounds,
+                len(children),
+                None,
+                lambda: self.reporter.advance(progress.Stage.DISCOVERY),
+            )
+        total = sum(
+            adapter.activity_page_count(
+                from_date=effective_from,
+                through_date=bounds.through_date,
+            )
+            for _child, effective_from in child_bounds
+        )
+        return (
+            child_bounds,
+            total,
+            lambda: self.reporter.advance(progress.Stage.DISCOVERY),
+            lambda: None,
+        )
 
     async def _discover_records(
         self,

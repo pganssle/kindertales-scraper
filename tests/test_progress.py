@@ -29,7 +29,7 @@ def test_terminal_reporter_renders_progress() -> None:
     reporter.close()
     output = stream.getvalue()
     assert progress.Stage.DISCOVERY.description in output
-    assert progress.Stage.DISCOVERY.unit == "child"
+    assert progress.Stage.DISCOVERY.unit == "page"
     assert "100%" in output
 
 

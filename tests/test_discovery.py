@@ -250,6 +250,7 @@ async def test_adapter_paginates() -> None:
         transport=httpx.MockTransport(handler),
     ) as client:
         adapter = discovery.KindertalesAdapter(client)
+        completed_pages: list[None] = []
         assert await adapter.children() == discovery.parse_children(children_response)
         activities = [
             item
@@ -257,9 +258,11 @@ async def test_adapter_paginates() -> None:
                 "child-1",
                 from_date=dt.date(2026, 7, 1),
                 through_date=dt.date(2026, 7, 2),
+                page_complete=lambda: completed_pages.append(None),
             )
         ]
     assert len(activities) == 1
+    assert len(completed_pages) == 2
     assert requests[1].url.params["cursor"] == "cursor-2"
     assert requests[1].url.params["from"] == "2026-07-01"
     assert requests[1].url.params["through"] == "2026-07-02"
@@ -630,6 +633,7 @@ async def test_legacy_adapter_traverses_inclusive_dates() -> None:
         max_retries=0,
     )
     requester = scheduler.Requester(policy, limiter)
+    completed_pages: list[None] = []
     async with httpx.AsyncClient(
         base_url="https://example.test",
         transport=httpx.MockTransport(handler),
@@ -647,6 +651,7 @@ async def test_legacy_adapter_traverses_inclusive_dates() -> None:
                 cursor="ignored",
                 from_date=dt.date(2026, 7, 14),
                 through_date=dt.date(2026, 7, 15),
+                page_complete=lambda: completed_pages.append(None),
             )
         ]
         second_child = [
@@ -662,6 +667,21 @@ async def test_legacy_adapter_traverses_inclusive_dates() -> None:
     assert requests[2].url.params["activitydate"] == "07/14/2026"
     assert requests[3].url.params["activitydate"] == "07/15/2026"
     assert limiter.calls == 5
+    assert len(completed_pages) == 2
+    assert (
+        discovery.LegacyKindertalesAdapter.activity_page_count(
+            from_date=dt.date(2026, 7, 14),
+            through_date=dt.date(2026, 7, 16),
+        )
+        == 3
+    )
+    assert (
+        discovery.LegacyKindertalesAdapter.activity_page_count(
+            from_date=None,
+            through_date=dt.date(2026, 7, 16),
+        )
+        == 0
+    )
     assert sum("notificationsV2" in request.url.path for request in requests) == 1
 
 
