@@ -26,6 +26,7 @@ test = [
     "coverage[toml]>=7.7",
     "hypothesis>=6.130",
     "mypy>=1.15",
+    "packaging>=25",
     "pytest>=8.3",
     "pytest-asyncio>=0.26",
     "ruff>=0.11",
@@ -77,6 +78,7 @@ ignore = [
     "S311",
     "TRY003",
 ]
+"scripts/**" = ["T201"]
 
 [tool.mypy]
 python_version = "3.13"

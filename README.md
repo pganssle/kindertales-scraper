@@ -175,9 +175,26 @@ state, live responses, or archive data.
 uvx tox
 ```
 
-The test environment runs Python 3.13 tests with branch coverage, Ruff, and
-strict mypy. Synthetic fixtures are the only Kindertales-shaped data committed
-to the repository. See [docs/live-smoke-run.md](docs/live-smoke-run.md) for the
-authorized live acceptance procedure.
+The test environment runs Python 3.13 and 3.14 tests with branch coverage,
+Ruff, and strict mypy. Synthetic fixtures are the only Kindertales-shaped data
+committed to the repository. See
+[docs/live-smoke-run.md](docs/live-smoke-run.md) for the authorized live
+acceptance procedure.
+
+## Releases
+
+Pull requests build and inspect both the wheel and source distribution. To
+enable releases, create a GitHub environment named `pypi`, then configure a
+PyPI trusted publisher for project `kindertales-scraper`, owner `pganssle`,
+repository `kindertales-scraper`, workflow `release.yml`, and environment
+`pypi`. No PyPI token is stored in GitHub.
+
+To release, update `project.version` in `pyproject.toml` and `__version__` in
+`src/kindertales_scraper/__init__.py` in the same commit. When that commit lands
+on `main`, the release workflow validates the two values, creates the matching
+version tag if it does not already exist, builds and checks the distributions,
+and publishes them to PyPI. A manually pushed tag also publishes, but only when
+the tag, source versions, wheel metadata, sdist metadata, and artifact filenames
+all agree.
 
 This project is licensed under the Apache License 2.0.

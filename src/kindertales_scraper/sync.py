@@ -629,7 +629,7 @@ class SyncEngine:
             )
         finally:
             await response.aclose()
-            if temporary is not None:
+            if temporary is not None:  # pragma: no branch
                 temporary.unlink(missing_ok=True)
 
     async def _download(
@@ -720,7 +720,7 @@ class SyncEngine:
             )
         finally:
             await response.aclose()
-            if temporary is not None:
+            if temporary is not None:  # pragma: no branch
                 temporary.unlink(missing_ok=True)
 
     @staticmethod
