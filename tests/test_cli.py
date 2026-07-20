@@ -67,7 +67,7 @@ def test_sync_command(
     """The sync CLI passes bounds and modes to the asynchronous runner."""
     config_path = tmp_path / "config.toml"
     config_path.write_text('[account]\nemail="a@example.com"', encoding="utf-8")
-    observed: list[tuple[sync.Bounds, bool, bool]] = []
+    observed: list[tuple[sync.Bounds, bool, bool, bool]] = []
 
     async def run(
         _settings: object,
@@ -75,8 +75,9 @@ def test_sync_command(
         *,
         dry_run: bool,
         headed: bool,
+        refresh_existing: bool,
     ) -> sync.SyncSummary:
-        observed.append((bounds, dry_run, headed))
+        observed.append((bounds, dry_run, headed, refresh_existing))
         return sync.SyncSummary(2, 3, 4, dry_run)
 
     monkeypatch.setattr(sync, "run_configured", run)
@@ -92,12 +93,13 @@ def test_sync_command(
                 "2026-07-02",
                 "--dry-run",
                 "--headed",
+                "--refresh",
             )
         )
         == 0
     )
     assert observed == [
-        (sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2)), True, True)
+        (sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2)), True, True, True)
     ]
     assert capsys.readouterr().out == (
         "2 children, 3 activities, 4 media, 0 records (dry run)\n"

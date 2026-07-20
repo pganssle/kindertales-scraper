@@ -123,6 +123,13 @@ later activity pages. All four progress bars are displayed from the beginning;
 media and document totals start at zero and grow as those files are discovered.
 A dry run performs discovery without requesting media.
 
+Existing media is not downloaded again when its indexed file and any required
+metadata sidecar are present and the file's SHA-256 matches the committed final
+hash. Missing or damaged files and entries in `media_failures` are downloaded
+again when rediscovered. Pass `--refresh` to download and replace valid existing
+media deliberately. Downloads remain under `archive/.tmp` until enrichment is
+complete, then move into `media/` with an atomic rename.
+
 ## Archive and privacy
 
 `index.sqlite3` uses a versioned schema with child, activity, media, record,

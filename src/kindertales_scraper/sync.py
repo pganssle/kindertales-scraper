@@ -176,6 +176,7 @@ class SyncEngine:
         bounds: Bounds | None = None,
         *,
         dry_run: bool = False,
+        refresh_existing: bool = False,
     ) -> SyncSummary:
         """Synchronize all exposed media within the effective date bounds."""
         if bounds is None:
@@ -201,6 +202,7 @@ class SyncEngine:
                 page_complete,
                 child_complete,
                 dry_run=dry_run,
+                refresh_existing=refresh_existing,
             )
             records = await self._discover_records_with_progress(children, bounds)
             media_count = len(
@@ -220,7 +222,10 @@ class SyncEngine:
                 self.store.store_record(record, record_child)
             await self._archive_documents(records)
             if not isinstance(self.adapter, PagedActivityAdapter):
-                await self._archive_activities(activities)
+                await self._archive_activities(
+                    activities,
+                    refresh_existing=refresh_existing,
+                )
             cursor_updates = self._cursor_updates(activities, cursors)
             self.store.mark_unavailable(
                 "children", tuple(child.id for child in children)
@@ -271,7 +276,7 @@ class SyncEngine:
         for stage, total in totals:
             self.reporter.start(stage, total)
 
-    async def _activities_for_run(
+    async def _activities_for_run(  # noqa: PLR0913 - sync context is explicit
         self,
         child_bounds: Sequence[tuple[discovery.Child, dt.date | None]],
         bounds: Bounds,
@@ -279,6 +284,7 @@ class SyncEngine:
         child_complete: Callable[[], None],
         *,
         dry_run: bool,
+        refresh_existing: bool,
     ) -> list[tuple[discovery.Child, discovery.Activity]]:
         if dry_run or not isinstance(self.adapter, PagedActivityAdapter):
             return await self._discover_activities(
@@ -293,6 +299,7 @@ class SyncEngine:
             child_bounds,
             bounds,
             counted=isinstance(self.adapter, CountedActivityAdapter),
+            refresh_existing=refresh_existing,
         )
 
     async def _discover_activities(
@@ -325,6 +332,7 @@ class SyncEngine:
         bounds: Bounds,
         *,
         counted: bool,
+        refresh_existing: bool,
     ) -> list[tuple[discovery.Child, discovery.Activity]]:
         pipeline = _ActivityPipeline(
             self,
@@ -332,6 +340,7 @@ class SyncEngine:
             counted,
             self._included,
             self._download,
+            refresh_existing,
         )
         return await pipeline.run(child_bounds)
 
@@ -451,6 +460,8 @@ class SyncEngine:
     async def _archive_activities(
         self,
         activities: Sequence[tuple[discovery.Child, discovery.Activity]],
+        *,
+        refresh_existing: bool,
     ) -> None:
         graph = scheduler.DAGScheduler(
             self.settings.request_policy.max_in_flight,
@@ -472,8 +483,13 @@ class SyncEngine:
             for medium in activity.media:
                 associations.append((activity.id, medium.id))
                 first_media.setdefault(medium.id, (child, activity, medium))
+        pending_media = {
+            media_id: context
+            for media_id, context in first_media.items()
+            if refresh_existing or not self.store.media_is_complete(media_id)
+        }
         for order, (media_id, (child, activity, medium)) in enumerate(
-            first_media.items()
+            pending_media.items()
         ):
 
             async def download(
@@ -494,7 +510,7 @@ class SyncEngine:
                     order=order,
                 )
             )
-        self.reporter.extend(progress.Stage.MEDIA, len(first_media))
+        self.reporter.extend(progress.Stage.MEDIA, len(pending_media))
         results = await graph.run()
         failures = tuple(
             result.error
@@ -735,6 +751,7 @@ class _ActivityPipeline:
         [discovery.Child, discovery.Activity, discovery.MediaReference],
         Awaitable[None],
     ]
+    refresh_existing: bool = False
     graph: scheduler.DynamicScheduler = attrs.field(init=False)
     activities: list[tuple[discovery.Child, discovery.Activity]] = attrs.field(
         factory=list, init=False
@@ -772,8 +789,7 @@ class _ActivityPipeline:
             msg = "one or more archive tasks failed"
             raise ExceptionGroup(msg, failures)
         for activity_id, media_id in self.associations:
-            if self.engine.store.has_media(media_id):
-                self.engine.store.link_media(activity_id, media_id)
+            self.engine.store.link_media(activity_id, media_id)
         return self.activities
 
     def schedule_page(
@@ -828,6 +844,11 @@ class _ActivityPipeline:
         if medium.id in self.media_ids:
             return
         self.media_ids.add(medium.id)
+        if (
+            not self.refresh_existing
+            and self.engine.store.media_is_complete(medium.id)
+        ):
+            return
         self.engine.reporter.extend(progress.Stage.MEDIA, 1)
 
         async def download() -> None:
@@ -897,6 +918,7 @@ async def run_configured(  # pragma: no cover - exercised by the authorized smok
     *,
     dry_run: bool,
     headed: bool,
+    refresh_existing: bool = False,
 ) -> SyncSummary:
     """Authenticate and run synchronization using production components."""
     password, _persistent = credentials.password(settings.email)
@@ -946,7 +968,11 @@ async def run_configured(  # pragma: no cover - exercised by the authorized smok
                 progress.TerminalReporter(),
                 names.InteractiveResolver(settings),
             )
-            return await engine.run(bounds, dry_run=dry_run)
+            return await engine.run(
+                bounds,
+                dry_run=dry_run,
+                refresh_existing=refresh_existing,
+            )
 
 
 def _canonical_media_type(value: str) -> str:

@@ -29,6 +29,15 @@ class ImmediateLimiter:
         return 0.0
 
 
+class InterruptedStream(httpx.AsyncByteStream):
+    """Yield one partial chunk before simulating an interrupted response."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield the partial response and then fail."""
+        yield b"partial"
+        raise httpx.ReadError("download interrupted")
+
+
 class FakeAdapter:
     """Return configured discovery records and retain requested bounds."""
 
@@ -723,14 +732,14 @@ async def test_streaming_sync_identifies_exiftool_media_failure(
 
 
 @pytest.mark.asyncio
-async def test_streaming_sync_records_empty_media_without_failing(
+async def test_sync_records_empty_media_without_failing(
     tmp_path: Path,
     records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
 ) -> None:
     """An empty successful response is indexed as a retryable media failure."""
     child, activities = records
     reporter = RecordingReporter()
-    adapter = PagedFakeAdapter((child,), activities, [])
+    adapter = FakeAdapter((child,), activities)
     transport = httpx.MockTransport(
         lambda _request: httpx.Response(
             200,
@@ -812,6 +821,70 @@ async def test_sync_downloads_deduplicates_and_archives(
         ("advance", progress.Stage.MEDIA, 1),
         ("close",),
     ]
+
+
+@pytest.mark.asyncio
+async def test_sync_reuses_complete_media_unless_refreshing(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """A matching archived hash avoids downloads unless refresh is explicit."""
+    child, activities = records
+    selected = activities[:1]
+    requests = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200,
+            content=b"source",
+            headers={"Content-Type": "image/jpeg"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    bounds = sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 1))
+    for refresh_existing in (False, False, True):
+        adapter = PagedFakeAdapter((child,), selected, [])
+        async for runner, store in engine(tmp_path, adapter, transport):
+            await runner.run(bounds, refresh_existing=refresh_existing)
+            row = store.connection.execute(
+                "SELECT relative_path FROM media WHERE id='media-1'"
+            ).fetchone()
+            destination = store.root / row["relative_path"]
+    assert requests == 2
+    destination.write_bytes(b"damaged")
+    adapter = PagedFakeAdapter((child,), selected, [])
+    async for runner, _store in engine(tmp_path, adapter, transport):
+        await runner.run(bounds)
+    assert requests == 3
+    assert destination.read_bytes() == b"source enriched"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_download_never_becomes_archived_media(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """A partial response remains temporary and cannot satisfy future reuse."""
+    child, activities = records
+    adapter = PagedFakeAdapter((child,), activities[:1], [])
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            headers={"Content-Type": "image/jpeg"},
+            stream=InterruptedStream(),
+        )
+    )
+    async for runner, store in engine(tmp_path, adapter, transport):
+        with pytest.raises(ExceptionGroup, match="archive tasks"):
+            await runner.run(
+                sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 1))
+            )
+        assert not store.has_media("media-1")
+    root = settings(tmp_path).archive_directory
+    assert not tuple((root / "media").rglob("*"))
+    assert not tuple((root / ".tmp").rglob("*"))
 
 
 @pytest.mark.asyncio

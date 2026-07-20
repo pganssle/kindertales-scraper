@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     synchronize.add_argument("--through", dest="through_date", type=sync.parse_date)
     synchronize.add_argument("--dry-run", action="store_true")
     synchronize.add_argument("--headed", action="store_true")
+    synchronize.add_argument(
+        "--refresh",
+        action="store_true",
+        help="download and replace media that already passes archive validation",
+    )
     verification = subparsers.add_parser("verify", help="verify an existing archive")
     verification.add_argument("--config", type=Path, default=Path("config.toml"))
     return parser
@@ -65,6 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sync.Bounds(arguments.from_date, arguments.through_date),
                     dry_run=arguments.dry_run,
                     headed=arguments.headed,
+                    refresh_existing=arguments.refresh,
                 )
             )
         except names.NameConfigurationRequiredError:

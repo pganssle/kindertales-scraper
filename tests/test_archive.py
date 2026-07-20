@@ -569,6 +569,7 @@ def test_in_memory_archive_does_not_create_files(tmp_path: Path) -> None:
 
 def test_failed_media_is_recorded_and_cleared_after_success(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
 ) -> None:
     """Unavailable media remains indexed until a later download succeeds."""
@@ -605,10 +606,45 @@ def test_failed_media_is_recorded_and_cleared_after_success(
             "SELECT count(*) FROM media_failures"
         ).fetchone()[0]
         assert store.has_media(medium.id)
+        assert store.media_is_complete(medium.id)
+        destination = store.root / store.connection.execute(
+            "SELECT relative_path FROM media WHERE id=?", (medium.id,)
+        ).fetchone()[0]
+        destination.write_bytes(b"damaged")
+        assert not store.media_is_complete(medium.id)
+        monkeypatch.setattr(
+            archive,
+            "sha256",
+            lambda _path: (_ for _ in ()).throw(OSError),
+        )
+        assert not store.media_is_complete(medium.id)
     assert failure["reason"] == "empty_response"
     assert failure["source_url"].endswith("token=REDACTED")
     assert json.loads(failure["http_properties_json"]) == {"content_length": "0"}
     assert remaining == 0
+
+
+def test_media_reuse_rejects_paths_outside_archive(
+    tmp_path: Path,
+    entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+) -> None:
+    """An indexed path cannot make reuse hash a file outside the archive."""
+    child, activity, medium = entities
+    source = tmp_path / "source"
+    source.write_bytes(b"media")
+    with archive.Archive(tmp_path / "archive") as store:
+        store.upsert_child(child)
+        store.upsert_activity(activity)
+        store.store_media(
+            archive.StoredMedia(
+                medium, activity, child, source, archive.sha256(source), {}
+            )
+        )
+        store.connection.execute(
+            "UPDATE media SET relative_path='../outside' WHERE id=?",
+            (medium.id,),
+        )
+        assert not store.media_is_complete(medium.id)
 
 
 def test_store_media_and_conflict_sidecar(
@@ -656,6 +692,11 @@ def test_store_media_and_conflict_sidecar(
     assert row["conflict_sidecar_path"].endswith(".jpg.json")
     assert row["source_sha256"] == source_hash == row["final_sha256"]
     assert link["activity_id"] == activity.id
+    with archive.Archive(tmp_path / "archive") as store:
+        assert store.media_is_complete(medium.id)
+    destination.with_suffix(".jpg.json").unlink()
+    with archive.Archive(tmp_path / "archive") as store:
+        assert not store.media_is_complete(medium.id)
 
 
 @pytest.mark.parametrize("with_sidecar", [False, True])

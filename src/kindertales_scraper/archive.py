@@ -625,6 +625,36 @@ class Archive:
         ).fetchone()
         return row is not None
 
+    def media_is_complete(self, media_id: str) -> bool:
+        """Return whether indexed media exists with its committed final hash."""
+        row = self.connection.execute(
+            """SELECT relative_path, final_sha256, conflict_sidecar_path
+            FROM media WHERE id=?""",
+            (media_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        destination = self._archive_path(str(row["relative_path"]))
+        if destination is None or not destination.is_file():
+            return False
+        conflict_sidecar = row["conflict_sidecar_path"]
+        if conflict_sidecar is not None:
+            sidecar = self._archive_path(str(conflict_sidecar))
+            if sidecar is None or not sidecar.is_file():
+                return False
+        try:
+            return sha256(destination) == str(row["final_sha256"])
+        except OSError:
+            return False
+
+    def _archive_path(self, relative: str) -> Path | None:
+        candidate = self.root / relative
+        try:
+            candidate.resolve().relative_to(self.root.resolve())
+        except ValueError:
+            return None
+        return candidate
+
     def _allocate_paths(self, record: StoredMedia) -> tuple[Path, Path]:
         timestamp = capture_timestamp(
             record.original_metadata,
@@ -707,11 +737,16 @@ class Archive:
 
     def link_media(self, activity_id: str, media_id: str) -> None:
         """Associate already archived media with another activity."""
-        self.connection.execute(
-            "INSERT OR IGNORE INTO activity_media VALUES (?, ?)",
-            (activity_id, media_id),
-        )
-        self.connection.commit()
+        with self.connection:
+            self.connection.execute(
+                """INSERT OR IGNORE INTO activity_media
+                SELECT ?, id FROM media WHERE id=?""",
+                (activity_id, media_id),
+            )
+            self.connection.execute(
+                "UPDATE media SET available=1 WHERE id=?",
+                (media_id,),
+            )
 
     def finish_sync(
         self,
