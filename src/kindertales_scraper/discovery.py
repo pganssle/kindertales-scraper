@@ -1232,6 +1232,9 @@ def _content_type(path: str) -> str | None:
     }.get(PurePosixPath(path).suffix.casefold())
 
 
+_MEDIA_PLACEHOLDERS = frozenset({"no_image.svg"})
+
+
 def parse_legacy_activities(
     document: str,
     child_id: str,
@@ -1257,12 +1260,15 @@ def parse_legacy_activities(
         for anchor in box.media:
             split_url = urlsplit(anchor.href)
             source_path = unquote(split_url.path)
+            filename = PurePosixPath(source_path).name
+            if filename.casefold() in _MEDIA_PLACEHOLDERS:
+                continue
             media.append(
                 MediaReference(
                     _stable_id(split_url.netloc, source_path),
                     anchor.href,
                     _content_type(source_path),
-                    PurePosixPath(source_path).name or None,
+                    filename or None,
                     anchor.title.strip()
                     if anchor.title and anchor.title.strip()
                     else None,

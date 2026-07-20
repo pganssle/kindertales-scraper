@@ -304,6 +304,40 @@ def test_exiftool_read_failure_reports_reason_without_local_path(
     assert str(tmp_path) not in str(caught.value)
 
 
+def test_exiftool_write_failure_reports_reason_without_command_metadata(
+    tmp_path: Path,
+    context: tuple[discovery.Child, discovery.Activity],
+) -> None:
+    """Write errors expose the reason without leaking ExifTool arguments."""
+    path = tmp_path / "private.svg"
+    path.write_bytes(b"<svg/>")
+    calls = 0
+
+    def fail(
+        arguments: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise subprocess.CalledProcessError(
+                1,
+                arguments,
+                stderr=(
+                    "Error: ExifTool does not support writing - "
+                    f"{path.with_suffix('.svg.enriching')}"
+                ),
+            )
+        return subprocess.CompletedProcess(arguments, 0, "[{}]", "")
+
+    child, activity = context
+    with pytest.raises(metadata.MetadataError) as caught:
+        metadata.ExifTool(runner=fail).enrich(path, child, activity, settings())
+    message = str(caught.value)
+    assert "does not support writing - <media>" in message
+    assert "A caption" not in message
+    assert str(tmp_path) not in message
+
+
 @pytest.mark.parametrize("phase", ["read", "write", "readback"])
 def test_exiftool_failure_cleans_atomic_copy(
     tmp_path: Path,

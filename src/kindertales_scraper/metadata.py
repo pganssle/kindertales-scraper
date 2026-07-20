@@ -18,6 +18,21 @@ class MetadataError(RuntimeError):
     """Raised when metadata cannot be read or enriched."""
 
 
+def _exiftool_diagnostic(
+    error: subprocess.CalledProcessError,
+    path: Path,
+) -> str:
+    detail = " ".join((error.stderr or "").split())
+    if not detail:
+        try:
+            failed_documents = json.loads(error.stdout or "")
+            failed_document = failed_documents[0]
+            detail = str(failed_document.get("ExifTool:Error", ""))
+        except (json.JSONDecodeError, IndexError, KeyError, TypeError):
+            return ""
+    return detail.replace(str(path), "<media>")[:500]
+
+
 @attrs.frozen
 class Enrichment:
     """Original metadata and fields selected for embedding."""
@@ -199,20 +214,12 @@ class ExifTool:
             msg = "ExifTool could not read media metadata"
             raise MetadataError(msg) from error
         except subprocess.CalledProcessError as error:
-            detail = " ".join((error.stderr or "").split())
-            if not detail:
-                try:
-                    failed_documents = json.loads(error.stdout or "")
-                    failed_document = failed_documents[0]
-                    detail = str(failed_document.get("ExifTool:Error", ""))
-                except (json.JSONDecodeError, IndexError, KeyError, TypeError):
-                    detail = ""
+            detail = _exiftool_diagnostic(error, path)
             if detail:
-                detail = detail.replace(str(path), "<media>")
-                msg = f"ExifTool could not read media metadata: {detail[:500]}"
+                msg = f"ExifTool could not read media metadata: {detail}"
             else:
                 msg = "ExifTool could not read media metadata"
-            raise MetadataError(msg) from error
+            raise MetadataError(msg) from None
         try:
             documents = json.loads(result.stdout)
         except json.JSONDecodeError as error:
@@ -259,11 +266,14 @@ class ExifTool:
             )
             embedded_fields = confirmed_fields(fields, self.read(temporary))
             temporary.replace(path)
-        except (
-            FileNotFoundError,
-            subprocess.CalledProcessError,
-            MetadataError,
-        ) as error:
+        except subprocess.CalledProcessError as error:
+            temporary.unlink(missing_ok=True)
+            detail = _exiftool_diagnostic(error, temporary)
+            msg = "ExifTool could not enrich media metadata"
+            if detail:
+                msg = f"{msg}: {detail}"
+            raise MetadataError(msg) from None
+        except (FileNotFoundError, MetadataError) as error:
             temporary.unlink(missing_ok=True)
             msg = "ExifTool could not enrich media metadata"
             raise MetadataError(msg) from error

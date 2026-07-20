@@ -464,6 +464,25 @@ def test_parse_legacy_daily_report() -> None:
     assert empty_activity[0].media == ()
 
 
+def test_parse_legacy_daily_report_ignores_media_placeholder() -> None:
+    """The generic no-image asset is not treated as child media."""
+    document = """
+    <div class="contentBoxes" id="myday">
+      <div class="enrollmentTitle">My Day</div>
+      <a class="html5lightbox image_video" href="/images/no_image.SVG"></a>
+      <a class="html5lightbox image_video" href="/uploads/photo.jpg"></a>
+    </div>
+    """
+    activities = discovery.parse_legacy_activities(
+        document,
+        "child-1",
+        dt.date(2026, 7, 14),
+        dt.UTC,
+    )
+    assert len(activities) == 1
+    assert tuple(medium.filename for medium in activities[0].media) == ("photo.jpg",)
+
+
 def test_news_feed_supplies_precise_activity_and_publication_times() -> None:
     """Media correlation replaces midnight without conflating publication time."""
     activity_date = dt.date(2026, 7, 14)
