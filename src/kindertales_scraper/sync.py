@@ -658,12 +658,19 @@ class SyncEngine:
                 activity,
                 caption=medium.caption or activity.caption,
             )
-            enrichment = self.enricher.enrich(
-                temporary,
-                child,
-                metadata_activity,
-                self.settings,
-            )
+            try:
+                enrichment = self.enricher.enrich(
+                    temporary,
+                    child,
+                    metadata_activity,
+                    self.settings,
+                )
+            except metadata.MetadataError as error:
+                msg = (
+                    f"could not process media {medium.id} from "
+                    f"{activity.occurred_at.date().isoformat()}: {error}"
+                )
+                raise SyncError(msg) from error
             self.store.store_media(
                 archive.StoredMedia(
                     medium=medium,

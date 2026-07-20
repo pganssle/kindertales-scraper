@@ -685,6 +685,44 @@ async def test_streaming_sync_filters_bounds_and_reports_media_failure(
 
 
 @pytest.mark.asyncio
+async def test_streaming_sync_identifies_exiftool_media_failure(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """Metadata failures identify the source media and activity date."""
+    child, activities = records
+
+    class FailingEnricher(FakeEnricher):
+        def enrich(
+            self,
+            path: Path,
+            child: discovery.Child,
+            activity: discovery.Activity,
+            settings: config.Config,
+        ) -> metadata.Enrichment:
+            del path, child, activity, settings
+            raise metadata.MetadataError("ExifTool reported a file format error")
+
+    adapter = PagedFakeAdapter((child,), activities, [])
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=b"bad image",
+            headers={"Content-Type": "image/jpeg"},
+        )
+    )
+    async for runner, _store in engine(tmp_path, adapter, transport):
+        runner.enricher = FailingEnricher()
+        with pytest.raises(ExceptionGroup) as caught:
+            await runner.run(
+                sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 1))
+            )
+    failure = str(caught.value.exceptions[0])
+    assert "media-1" in failure
+    assert "2026-07-01" in failure
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "returned_content_type",
     ["image/jpeg", "image/jpg", "IMAGE/PJPEG; charset=binary"],
