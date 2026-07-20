@@ -13,10 +13,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  tests:
-    name: Tests
+  tox:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      TOXENV: ${{ matrix.toxenv }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Tests
+            toxenv: py313
+          - name: Lint
+            toxenv: lint
+          - name: Type check
+            toxenv: type
 
     steps:
       - name: Check out the repository
@@ -28,56 +40,11 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
+          cache-suffix: ${{ matrix.toxenv }}
           python-version: "3.13"
 
       - name: Install Python 3.13
         run: uv python install 3.13
 
-      - name: Run tests
-        run: uvx --with tox-uv tox -e py313
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          enable-cache: true
-          python-version: "3.13"
-
-      - name: Install Python 3.13
-        run: uv python install 3.13
-
-      - name: Run Ruff
-        run: uvx --with tox-uv tox -e lint
-
-  type-check:
-    name: Type check
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          enable-cache: true
-          python-version: "3.13"
-
-      - name: Install Python 3.13
-        run: uv python install 3.13
-
-      - name: Run mypy
-        run: uvx --with tox-uv tox -e type
+      - name: Run ${{ matrix.name }}
+        run: uvx --with tox-uv tox
