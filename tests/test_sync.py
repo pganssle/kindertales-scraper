@@ -723,6 +723,43 @@ async def test_streaming_sync_identifies_exiftool_media_failure(
 
 
 @pytest.mark.asyncio
+async def test_streaming_sync_records_empty_media_without_failing(
+    tmp_path: Path,
+    records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
+) -> None:
+    """An empty successful response is indexed as a retryable media failure."""
+    child, activities = records
+    reporter = RecordingReporter()
+    adapter = PagedFakeAdapter((child,), activities, [])
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=b"",
+            headers={"Content-Type": "image/jpeg", "Content-Length": "0"},
+        )
+    )
+    async for runner, store in engine(tmp_path, adapter, transport, reporter):
+        summary = await runner.run(
+            sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2))
+        )
+        failures = store.connection.execute(
+            "SELECT * FROM media_failures"
+        ).fetchall()
+        media_count = store.connection.execute("SELECT count(*) FROM media").fetchone()[
+            0
+        ]
+        run_status = store.connection.execute(
+            "SELECT status FROM sync_runs"
+        ).fetchone()[0]
+    assert summary.media == 1
+    assert media_count == 0
+    assert run_status == "complete"
+    assert len(failures) == 1
+    assert failures[0]["reason"] == "empty_response"
+    assert reporter.events.count(("advance", progress.Stage.MEDIA, 1)) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "returned_content_type",
     ["image/jpeg", "image/jpg", "IMAGE/PJPEG; charset=binary"],

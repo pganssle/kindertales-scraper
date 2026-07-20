@@ -560,8 +560,55 @@ def test_reject_newer_schema(tmp_path: Path) -> None:
 def test_in_memory_archive_does_not_create_files(tmp_path: Path) -> None:
     """Dry-run storage provides the schema without touching its working directory."""
     with archive.Archive.memory() as store:
-        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert (
+            store.connection.execute("PRAGMA user_version").fetchone()[0]
+            == archive.SCHEMA_VERSION
+        )
     assert not tuple(tmp_path.iterdir())
+
+
+def test_failed_media_is_recorded_and_cleared_after_success(
+    tmp_path: Path,
+    entities: tuple[discovery.Child, discovery.Activity, discovery.MediaReference],
+) -> None:
+    """Unavailable media remains indexed until a later download succeeds."""
+    child, activity, medium = entities
+    source = tmp_path / "source"
+    source.write_bytes(b"media")
+    with archive.Archive(tmp_path / "archive") as store:
+        store.upsert_child(child)
+        store.upsert_activity(activity)
+        store.store_media_failure(
+            archive.FailedMedia(
+                medium,
+                activity,
+                child,
+                "empty_response",
+                {"content_length": "0"},
+            )
+        )
+        failure = store.connection.execute(
+            "SELECT * FROM media_failures"
+        ).fetchone()
+        assert not store.has_media(medium.id)
+        store.store_media(
+            archive.StoredMedia(
+                medium,
+                activity,
+                child,
+                source,
+                archive.sha256(source),
+                {},
+            )
+        )
+        remaining = store.connection.execute(
+            "SELECT count(*) FROM media_failures"
+        ).fetchone()[0]
+        assert store.has_media(medium.id)
+    assert failure["reason"] == "empty_response"
+    assert failure["source_url"].endswith("token=REDACTED")
+    assert json.loads(failure["http_properties_json"]) == {"content_length": "0"}
+    assert remaining == 0
 
 
 def test_store_media_and_conflict_sidecar(

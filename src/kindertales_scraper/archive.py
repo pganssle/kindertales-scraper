@@ -14,7 +14,7 @@ import attrs
 
 from . import config, discovery, redaction
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 RECORD_VERSION = 1
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -161,6 +161,17 @@ class StoredDocument:
     content_type: str | None = None
 
 
+@attrs.frozen
+class FailedMedia:
+    """A discovered medium whose remote response could not be archived."""
+
+    medium: discovery.MediaReference
+    activity: discovery.Activity
+    child: discovery.Child
+    reason: str
+    http_properties: Mapping[str, Any] = attrs.field(factory=dict)
+
+
 class Archive:
     """Own the SQLite index and atomic archive filesystem updates."""
 
@@ -206,7 +217,7 @@ class Archive:
 
     def _initialize(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version not in {0, 1, 2, 3, 4, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, 4, 5, SCHEMA_VERSION}:
             msg = f"unsupported archive schema version: {version}"
             raise ArchiveError(msg)
         self.connection.executescript(
@@ -234,6 +245,15 @@ class Archive:
                 activity_id TEXT NOT NULL REFERENCES activities(id),
                 media_id TEXT NOT NULL REFERENCES media(id),
                 PRIMARY KEY (activity_id, media_id)
+            );
+            CREATE TABLE IF NOT EXISTS media_failures (
+                media_id TEXT NOT NULL,
+                activity_id TEXT NOT NULL REFERENCES activities(id),
+                child_id TEXT NOT NULL REFERENCES children(id),
+                filename TEXT, content_type TEXT, source_url TEXT NOT NULL,
+                reason TEXT NOT NULL, observed_at TEXT NOT NULL,
+                http_properties_json TEXT NOT NULL,
+                PRIMARY KEY (media_id, activity_id)
             );
             CREATE TABLE IF NOT EXISTS records (
                 id TEXT PRIMARY KEY, category TEXT NOT NULL,
@@ -546,6 +566,10 @@ class Archive:
                     ),
                 )
                 self.connection.execute(
+                    "DELETE FROM media_failures WHERE media_id=?",
+                    (record.medium.id,),
+                )
+                self.connection.execute(
                     "INSERT OR IGNORE INTO activity_media VALUES (?, ?)",
                     (record.activity.id, record.medium.id),
                 )
@@ -566,6 +590,40 @@ class Archive:
                 conflict_sidecar,
             )
         return destination
+
+    def store_media_failure(self, record: FailedMedia) -> None:
+        """Record a remote medium that could not produce an archive file."""
+        self.connection.execute(
+            """INSERT INTO media_failures
+            (media_id, activity_id, child_id, filename, content_type, source_url,
+            reason, observed_at, http_properties_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(media_id, activity_id) DO UPDATE SET
+            child_id=excluded.child_id, filename=excluded.filename,
+            content_type=excluded.content_type, source_url=excluded.source_url,
+            reason=excluded.reason, observed_at=excluded.observed_at,
+            http_properties_json=excluded.http_properties_json""",
+            (
+                record.medium.id,
+                record.activity.id,
+                record.child.id,
+                record.medium.filename,
+                record.medium.content_type,
+                redaction.url(record.medium.url),
+                record.reason,
+                dt.datetime.now(dt.UTC).isoformat(),
+                json.dumps(record.http_properties, sort_keys=True),
+            ),
+        )
+        self.connection.commit()
+
+    def has_media(self, media_id: str) -> bool:
+        """Return whether a medium has an archived file."""
+        row = self.connection.execute(
+            "SELECT 1 FROM media WHERE id=?",
+            (media_id,),
+        ).fetchone()
+        return row is not None
 
     def _allocate_paths(self, record: StoredMedia) -> tuple[Path, Path]:
         timestamp = capture_timestamp(

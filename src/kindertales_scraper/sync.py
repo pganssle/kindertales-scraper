@@ -654,6 +654,22 @@ class SyncEngine:
                 async for chunk in response.aiter_bytes():
                     stream.write(chunk)
                     digest.update(chunk)
+            http_properties = {
+                "content_type": content_type,
+                "content_length": response.headers.get("Content-Length"),
+                "etag": response.headers.get("ETag"),
+            }
+            if temporary.stat().st_size == 0:
+                self.store.store_media_failure(
+                    archive.FailedMedia(
+                        medium,
+                        activity,
+                        child,
+                        "empty_response",
+                        http_properties,
+                    )
+                )
+                return
             metadata_activity = attrs.evolve(
                 activity,
                 caption=medium.caption or activity.caption,
@@ -683,11 +699,7 @@ class SyncEngine:
                     inferred_time=enrichment.inferred_time,
                     inferred_gps=enrichment.inferred_gps,
                     sidecar_metadata=enrichment.sidecar_metadata,
-                    http_properties={
-                        "content_type": content_type,
-                        "content_length": response.headers.get("Content-Length"),
-                        "etag": response.headers.get("ETag"),
-                    },
+                    http_properties=http_properties,
                 )
             )
         finally:
@@ -760,7 +772,8 @@ class _ActivityPipeline:
             msg = "one or more archive tasks failed"
             raise ExceptionGroup(msg, failures)
         for activity_id, media_id in self.associations:
-            self.engine.store.link_media(activity_id, media_id)
+            if self.engine.store.has_media(media_id):
+                self.engine.store.link_media(activity_id, media_id)
         return self.activities
 
     def schedule_page(

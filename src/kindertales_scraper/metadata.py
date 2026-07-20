@@ -200,6 +200,13 @@ class ExifTool:
             raise MetadataError(msg) from error
         except subprocess.CalledProcessError as error:
             detail = " ".join((error.stderr or "").split())
+            if not detail:
+                try:
+                    failed_documents = json.loads(error.stdout or "")
+                    failed_document = failed_documents[0]
+                    detail = str(failed_document.get("ExifTool:Error", ""))
+                except (json.JSONDecodeError, IndexError, KeyError, TypeError):
+                    detail = ""
             if detail:
                 detail = detail.replace(str(path), "<media>")
                 msg = f"ExifTool could not read media metadata: {detail[:500]}"
