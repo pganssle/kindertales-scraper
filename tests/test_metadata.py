@@ -277,6 +277,27 @@ def test_invalid_exiftool_output(tmp_path: Path, output: str, message: str) -> N
         metadata.ExifTool(runner=FakeRunner(output)).read(path)
 
 
+def test_exiftool_read_failure_reports_reason_without_local_path(
+    tmp_path: Path,
+) -> None:
+    """ExifTool diagnostics identify bad content without exposing host paths."""
+    path = tmp_path / "private-location.jpg"
+
+    def fail(
+        arguments: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            1,
+            arguments,
+            stderr=f"Error: File format error - {path}",
+        )
+
+    with pytest.raises(metadata.MetadataError) as caught:
+        metadata.ExifTool(runner=fail).read(path)
+    assert "File format error - <media>" in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
+
+
 @pytest.mark.parametrize("phase", ["read", "write", "readback"])
 def test_exiftool_failure_cleans_atomic_copy(
     tmp_path: Path,

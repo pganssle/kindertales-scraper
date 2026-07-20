@@ -195,8 +195,16 @@ class ExifTool:
                 capture_output=True,
                 text=True,
             )
-        except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        except FileNotFoundError as error:
             msg = "ExifTool could not read media metadata"
+            raise MetadataError(msg) from error
+        except subprocess.CalledProcessError as error:
+            detail = " ".join((error.stderr or "").split())
+            if detail:
+                detail = detail.replace(str(path), "<media>")
+                msg = f"ExifTool could not read media metadata: {detail[:500]}"
+            else:
+                msg = "ExifTool could not read media metadata"
             raise MetadataError(msg) from error
         try:
             documents = json.loads(result.stdout)
