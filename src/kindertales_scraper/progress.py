@@ -26,6 +26,11 @@ class Stage(enum.Enum):
         """Return the item unit for this stage."""
         return self.value[1]
 
+    @property
+    def position(self) -> int:
+        """Return this stage's stable terminal row."""
+        return tuple(Stage).index(self)
+
 
 class Bar(Protocol):
     """Operations used from a terminal progress bar."""
@@ -100,6 +105,7 @@ class BarFactory(Protocol):
         stream: TextIO,
         *,
         disable: bool | None,
+        position: int,
     ) -> Bar:
         """Return a configured bar."""
         ...
@@ -111,6 +117,7 @@ def _terminal_bar(
     stream: TextIO,
     *,
     disable: bool | None,
+    position: int,
 ) -> Bar:
     return cast(
         "Bar",
@@ -121,6 +128,8 @@ def _terminal_bar(
             dynamic_ncols=True,
             file=stream,
             disable=disable,
+            position=position,
+            leave=True,
         ),
     )
 
@@ -137,14 +146,15 @@ class TerminalReporter:
 
     def start(self, stage: Stage, total: int) -> None:
         """Create a terminal bar for a stage."""
-        existing = self._bars.pop(stage, None)
-        if existing is not None:
-            existing.close()
+        if stage in self._bars:
+            msg = f"progress stage already started: {stage.name}"
+            raise ValueError(msg)
         self._bars[stage] = self.bar_factory(
             stage,
             total,
             self.stream,
             disable=self.disable,
+            position=stage.position,
         )
         self._remaining[stage] = total
 
@@ -152,9 +162,6 @@ class TerminalReporter:
         """Advance an active terminal bar."""
         self._bars[stage].update()
         self._remaining[stage] -= 1
-        if self._remaining[stage] <= 0:
-            self._bars.pop(stage).close()
-            del self._remaining[stage]
 
     def extend(self, stage: Stage, amount: int) -> None:
         """Increase an active bar's total for newly discovered work."""

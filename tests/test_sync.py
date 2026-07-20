@@ -598,11 +598,11 @@ async def test_uncounted_stream_extends_discovery_and_media_progress(
 
 
 @pytest.mark.asyncio
-async def test_sparse_stream_restarts_completed_media_progress(
+async def test_sparse_stream_extends_completed_media_progress(
     tmp_path: Path,
     records: tuple[discovery.Child, tuple[discovery.Activity, ...]],
 ) -> None:
-    """A later medium starts a new bar after the preceding download completed."""
+    """A later medium extends the original bar after it reaches its total."""
     child, activities = records
     second_medium = attrs.evolve(
         activities[1].media[0],
@@ -637,7 +637,8 @@ async def test_sparse_stream_restarts_completed_media_progress(
     ):
         await runner.run(sync.Bounds(dt.date(2026, 7, 1), dt.date(2026, 7, 2)))
     assert ("start", progress.Stage.MEDIA, 0) in reporter.events
-    assert reporter.events.count(("start", progress.Stage.MEDIA, 1)) == 1
+    assert reporter.events.count(("extend", progress.Stage.MEDIA, 1)) == 2
+    assert ("start", progress.Stage.MEDIA, 1) not in reporter.events
 
 
 @pytest.mark.asyncio

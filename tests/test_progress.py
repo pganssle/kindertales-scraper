@@ -3,6 +3,8 @@
 import io
 from typing import TextIO
 
+import pytest
+
 from kindertales_scraper import progress
 
 
@@ -39,8 +41,8 @@ def test_terminal_reporter_renders_progress() -> None:
     assert "100%" in output
 
 
-def test_restarting_and_closing_terminal_bars() -> None:
-    """Restarting a phase closes its old bar and final closure clears all bars."""
+def test_completed_bars_remain_extensible_until_final_close() -> None:
+    """A completed bar can gain work without being closed or recreated."""
     bars: list[FakeBar] = []
 
     def factory(
@@ -49,22 +51,28 @@ def test_restarting_and_closing_terminal_bars() -> None:
         _stream: TextIO,
         *,
         disable: bool | None,
+        position: int,
     ) -> FakeBar:
         assert disable is None
+        assert position == _stage.position
         bar = FakeBar()
         bar.total = float(_total)
         bars.append(bar)
         return bar
 
     reporter = progress.TerminalReporter(bar_factory=factory)
-    reporter.start(progress.Stage.MEDIA, 2)
+    reporter.start(progress.Stage.MEDIA, 1)
+    with pytest.raises(ValueError, match="already started"):
+        reporter.start(progress.Stage.MEDIA, 1)
     reporter.advance(progress.Stage.MEDIA)
     reporter.extend(progress.Stage.MEDIA, 2)
+    reporter.advance(progress.Stage.MEDIA)
     reporter.extend(progress.Stage.MEDIA, 0)
-    reporter.start(progress.Stage.MEDIA, 1)
     reporter.start(progress.Stage.DISCOVERY, 1)
     reporter.close()
-    assert bars[0].updates == 1
-    assert bars[0].total == 4
+    assert tuple(stage.position for stage in progress.Stage) == (0, 1, 2, 3)
+    assert len(bars) == 2
+    assert bars[0].updates == 2
+    assert bars[0].total == 3
     assert bars[0].refreshes == 1
     assert all(bar.closed for bar in bars)

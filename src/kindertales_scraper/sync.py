@@ -722,8 +722,6 @@ class _ActivityPipeline:
     )
     associations: list[tuple[str, str]] = attrs.field(factory=list, init=False)
     media_ids: set[str] = attrs.field(factory=set, init=False)
-    media_pending: int = attrs.field(default=0, init=False)
-    media_bar_open: bool = attrs.field(default=True, init=False)
     order: int = attrs.field(default=0, init=False)
 
     def __attrs_post_init__(self) -> None:
@@ -810,19 +808,11 @@ class _ActivityPipeline:
         if medium.id in self.media_ids:
             return
         self.media_ids.add(medium.id)
-        if self.media_bar_open:
-            self.engine.reporter.extend(progress.Stage.MEDIA, 1)
-        else:
-            self.engine.reporter.start(progress.Stage.MEDIA, 1)
-            self.media_bar_open = True
-        self.media_pending += 1
+        self.engine.reporter.extend(progress.Stage.MEDIA, 1)
 
         async def download() -> None:
             await self.download_media(child, activity, medium)
             self.engine.reporter.advance(progress.Stage.MEDIA)
-            self.media_pending -= 1
-            if not self.media_pending:
-                self.media_bar_open = False
 
         self._add_work(
             scheduler.Work(
