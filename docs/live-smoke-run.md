@@ -4,6 +4,10 @@ Do not run this procedure until Kindertales has provided written authorization
 for the account, linked children, session reuse, requested date range, and the
 configured quotas.
 
+Install the command and its Playwright-managed Chromium binary using one of the
+`uv tool install` or `uv venv` procedures in the README before continuing.
+ExifTool must also be available on `PATH`.
+
 Use a narrow range known to contain at most a few media objects:
 
 ```console

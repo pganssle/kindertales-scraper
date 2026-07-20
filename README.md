@@ -29,14 +29,30 @@ unread state, bodies, and supported attachments.
 
 ## Installation
 
-The project requires Python 3.13 or newer. ExifTool is also required for media
-metadata enrichment and verification.
+The project requires Python 3.13+ and ExifTool. ExifTool is a system dependency
+used for media metadata enrichment and verification. Python and the Python
+packages (including Playwright) can be managed entirely by
+[`uv`](https://docs.astral.sh/uv/), though `uv` is not required.
+
+For ordinary command-line use, the easiest thing to do is to use `uv` to
+install the scraper as an isolated tool from the repository checkout.
+`--with-executables-from playwright` exposes Playwright's browser installer
+from the same tool environment as the scraper:
 
 ```console
-python3.13 -m pip install .
+uv tool install --python 3.13 --with-executables-from playwright .
 playwright install chromium
 exiftool -ver
+kindertales-scraper --version
 ```
+
+If `uv` warns that its executable directory is not on `PATH`, run
+`uv tool update-shell` and start a new shell. The Chromium command downloads the
+Playwright-managed browser binary; Playwright does not need to be installed as
+a separate system package.
+
+The activation command above is for POSIX shells. On Windows PowerShell, use
+`.venv\Scripts\Activate.ps1` instead.
 
 Copy `config.toml.example` to `config.toml`, or create the initial private file
 interactively:
@@ -156,7 +172,7 @@ state, live responses, or archive data.
 ## Development
 
 ```console
-tox
+uvx tox
 ```
 
 The test environment runs Python 3.13 tests with branch coverage, Ruff, and
