@@ -14,21 +14,17 @@ concurrency:
 
 jobs:
   tox:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.toxenv }} (Python ${{ matrix.python-version }})
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
       TOXENV: ${{ matrix.toxenv }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Tests
-            toxenv: py313
-          - name: Lint
-            toxenv: lint
-          - name: Type check
-            toxenv: type
+        python-version: ["3.13", "3.14"]
+        toxenv: [py, lint, type]
 
     steps:
       - name: Check out the repository
@@ -40,11 +36,11 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
-          cache-suffix: ${{ matrix.toxenv }}
-          python-version: "3.13"
+          cache-suffix: ${{ matrix.toxenv }}-${{ matrix.python-version }}
+          python-version: ${{ matrix.python-version }}
 
-      - name: Install Python 3.13
-        run: uv python install 3.13
+      - name: Install Python ${{ matrix.python-version }}
+        run: uv python install "$PYTHON_VERSION"
 
-      - name: Run ${{ matrix.name }}
+      - name: Run tox environment
         run: uvx --with tox-uv tox
