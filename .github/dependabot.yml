@@ -1,11 +1,21 @@
 version: 2
-updates:
-  - package-ecosystem: uv
-    directory: /
+
+multi-ecosystem-groups:
+  dependencies:
     schedule:
       interval: quarterly
 
+updates:
+  - package-ecosystem: uv
+    directory: /
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 14
+
   - package-ecosystem: github-actions
     directory: /
-    schedule:
-      interval: quarterly
+    patterns: ["*"]
+    multi-ecosystem-group: dependencies
+    cooldown:
+      default-days: 14
