@@ -510,7 +510,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "attrs", specifier = ">=25.1" },
-    { name = "coverage", extras = ["toml"], marker = "extra == 'test'", specifier = ">=7.7" },
+    { name = "coverage", extras = ["toml"], marker = "extra == 'test'", specifier = ">=7.15.2" },
     { name = "cryptography", specifier = ">=44" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "hypothesis", marker = "extra == 'test'", specifier = ">=6.130" },
