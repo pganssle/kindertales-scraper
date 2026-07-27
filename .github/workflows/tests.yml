@@ -42,5 +42,20 @@ jobs:
       - name: Install Python ${{ matrix.python-version }}
         run: uv python install "$PYTHON_VERSION"
 
-      - name: Run tox environment
-        run: uvx --with tox-uv tox
+      - name: Run ${{ matrix.toxenv }}
+        run: |
+          case "$TOXENV" in
+            py)
+              uv run --locked --extra test --python "$PYTHON_VERSION" \
+                coverage run -m pytest
+              uv run --locked --extra test --python "$PYTHON_VERSION" \
+                coverage report
+              ;;
+            lint)
+              uv run --locked --extra test --python "$PYTHON_VERSION" \
+                ruff check .
+              ;;
+            type)
+              uv run --locked --extra test --python "$PYTHON_VERSION" mypy
+              ;;
+          esac
