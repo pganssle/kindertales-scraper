@@ -1033,6 +1033,43 @@ async def test_account_records_follow_message_details() -> None:
 
 
 @pytest.mark.asyncio
+async def test_message_record_id_does_not_depend_on_pagination() -> None:
+    """A growing message folder retains its archive identity."""
+    paginated = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (
+            paginated
+            and request.url.params.get("subpg") == "inbox"
+            and request.url.params.get("page") is None
+        ):
+            return httpx.Response(
+                200,
+                text=(
+                    '<a href="/index.php?pg=messagecentre&amp;subpg=inbox&amp;'
+                    'page=2">Next</a>'
+                ),
+            )
+        return httpx.Response(200, text="")
+
+    async with httpx.AsyncClient(
+        base_url="https://example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        adapter = discovery.LegacyKindertalesAdapter(client)
+        initial = await adapter.account_records(messages=True, billing=False)
+        paginated = True
+        expanded = await adapter.account_records(messages=True, billing=False)
+    initial_inbox = next(
+        record for record in initial if record.category == "messages_inbox"
+    )
+    expanded_inbox = next(
+        record for record in expanded if record.category == "messages_inbox"
+    )
+    assert initial_inbox.id == expanded_inbox.id
+
+
+@pytest.mark.asyncio
 async def test_unavailable_contacts_and_billing_are_skipped() -> None:
     """Dashboard redirects omit unavailable optional account areas."""
 
