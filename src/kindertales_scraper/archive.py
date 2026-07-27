@@ -367,8 +367,8 @@ class Archive:
         )
         try:
             with self.connection:
-                self.connection.execute(
-                    "DELETE FROM records WHERE relative_path=? AND id<>? "
+                superseded = self.connection.execute(
+                    "SELECT id FROM records WHERE relative_path=? AND id<>? "
                     "AND category=? AND child_id IS ?",
                     (
                         relative.as_posix(),
@@ -376,7 +376,28 @@ class Archive:
                         record.category,
                         record.child_id,
                     ),
+                ).fetchone()
+                linked_documents = (
+                    tuple(
+                        row["document_id"]
+                        for row in self.connection.execute(
+                            "SELECT document_id FROM record_documents "
+                            "WHERE record_id=?",
+                            (superseded["id"],),
+                        )
+                    )
+                    if superseded is not None
+                    else ()
                 )
+                if superseded is not None:
+                    self.connection.execute(
+                        "DELETE FROM record_documents WHERE record_id=?",
+                        (superseded["id"],),
+                    )
+                    self.connection.execute(
+                        "DELETE FROM records WHERE id=?",
+                        (superseded["id"],),
+                    )
                 self.connection.execute(
                     """INSERT INTO records
                     (id, category, child_id, relative_path, source_url, observed_at,
@@ -396,6 +417,10 @@ class Archive:
                         record.title,
                         json.dumps(record.details, sort_keys=True),
                     ),
+                )
+                self.connection.executemany(
+                    "INSERT OR IGNORE INTO record_documents VALUES (?, ?)",
+                    ((record.id, document_id) for document_id in linked_documents),
                 )
                 temporary.replace(destination)
         except Exception:

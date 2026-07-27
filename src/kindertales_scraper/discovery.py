@@ -1624,7 +1624,8 @@ class LegacyKindertalesAdapter:
         pending = [listing_url]
         known_pages = {listing_url}
         links: dict[str, MessageLink] = {}
-        source_url = str(self.client.base_url.join(listing_url))
+        canonical_url = str(self.client.base_url.join(listing_url))
+        source_url = canonical_url
         while pending:
             page_url = pending.pop(0)
             response = await self.get(page_url)
@@ -1664,7 +1665,7 @@ class LegacyKindertalesAdapter:
             documents.update({item.id: item for item in attached})
         observed_at = dt.datetime.now(dt.UTC)
         return Record(
-            _stable_id(f"messages_{subpage}", source_url),
+            _stable_id(f"messages_{subpage}", canonical_url),
             f"messages_{subpage}",
             source_url,
             observed_at,

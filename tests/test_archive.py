@@ -399,9 +399,14 @@ def test_store_structured_child_and_account_records(tmp_path: Path) -> None:
 
 
 def test_new_record_source_replaces_same_child_category(tmp_path: Path) -> None:
-    """A corrected endpoint may supersede an older snapshot at the same path."""
+    """A corrected endpoint supersedes a snapshot without losing document links."""
     child = discovery.Child("child-1", "A Child")
     observed = dt.datetime(2026, 7, 19, tzinfo=dt.UTC)
+    document = discovery.DocumentReference(
+        "document",
+        "https://example.test/report.pdf",
+        "report.pdf",
+    )
     old = discovery.Record(
         "old",
         "attendance",
@@ -409,6 +414,7 @@ def test_new_record_source_replaces_same_child_category(tmp_path: Path) -> None:
         observed,
         {"ui": True},
         child.id,
+        documents=(document,),
     )
     new = discovery.Record(
         "new",
@@ -421,9 +427,22 @@ def test_new_record_source_replaces_same_child_category(tmp_path: Path) -> None:
     with archive.Archive(tmp_path) as store:
         store.upsert_child(child)
         path = store.store_record(old, child)
+        temporary = tmp_path / "report.tmp"
+        temporary.write_bytes(b"report")
+        store.store_document(
+            archive.StoredDocument(
+                document,
+                old,
+                child,
+                temporary,
+                archive.sha256(temporary),
+            )
+        )
         assert store.store_record(new, child) == path
         rows = store.connection.execute("SELECT id FROM records").fetchall()
+        links = store.connection.execute("SELECT * FROM record_documents").fetchall()
     assert [row["id"] for row in rows] == ["new"]
+    assert [tuple(row) for row in links] == [("new", "document")]
     assert json.loads(path.read_text(encoding="utf-8"))["details"] == {"events": []}
 
 
